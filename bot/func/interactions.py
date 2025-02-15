@@ -9,6 +9,7 @@ from aiohttp import ClientTimeout
 from asyncio import Lock
 from functools import wraps
 from dotenv import load_dotenv
+import re  # Add this import at the top if not already present
 load_dotenv()
 token = os.getenv("TOKEN")
 allowed_ids = list(map(int, os.getenv("USER_IDS", "").split(",")))
@@ -230,3 +231,51 @@ class contextLock:
 
     async def __aexit__(self, exc_type, exc_value, exc_traceback):
         self.lock.release()
+
+def convert_markdown_for_telegram(text, is_group=False):
+    """
+    Convert markdown text for Telegram into equivalent HTML formatting while escaping HTML special characters.
+    Converts non-empty <think> tags to monospace format, removes empty ones.
+    """
+    # First escape HTML special characters except those already in HTML tags
+    parts = re.split(r'(<[^>]*>)', text)
+    for i in range(0, len(parts), 2):  # Only escape non-tag parts
+        parts[i] = parts[i].replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    text = ''.join(parts)
+
+    # Remove empty think tags and convert non-empty ones to monospace
+    text = re.sub(r'<think>\s*</think>\s*', '', text)  # Remove empty think tags
+    text = re.sub(r'<think>(.*?)</think>',
+                 lambda m: f'<code>{m.group(1).strip().replace("<", "&lt;").replace(">", "&gt;")}</code>' if m.group(1).strip() else '',
+                 text, flags=re.DOTALL)
+
+    # Handle code blocks first to prevent other formatting inside them
+    def escape_code(match):
+        code = match.group(1) if len(match.groups()) == 1 else match.group(2)
+        # Escape HTML in code blocks
+        code = code.replace('<', '&lt;').replace('>', '&gt;')
+        return f'<pre><code>{code}</code></pre>'
+
+    # Code blocks with language specification ```python
+    text = re.sub(r'```(\w+)\n(.*?)```', escape_code, text, flags=re.DOTALL)
+    # Regular code blocks ```
+    text = re.sub(r'```(.*?)```', escape_code, text, flags=re.DOTALL)
+    # Inline code `text`
+    text = re.sub(r'`(.*?)`', lambda m: f'<code>{m.group(1).replace("<", "&lt;").replace(">", "&gt;")}</code>', text)
+
+    # Other formatting
+    text = re.sub(r'(\*\*|__)(.*?)\1', lambda m: f'<b>{m.group(2)}</b>', text)
+    text = re.sub(r'(\*|_)(.*?)\1', lambda m: f'<i>{m.group(2)}</i>', text)
+    text = re.sub(r'~~(.*?)~~', lambda m: f'<s>{m.group(1)}</s>', text)
+    text = re.sub(r'__(.*?)__', lambda m: f'<u>{m.group(1)}</u>', text)
+    text = re.sub(r'\[(.*?)\]\((.*?)\)', lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', text)
+    text = re.sub(r'\|\|(.*?)\|\|', lambda m: f'<tg-spoiler>{m.group(1)}</tg-spoiler>', text)
+    text = re.sub(r'^\s*[-*+]\s+(.+)$', r'• \1', text, flags=re.MULTILINE)
+    text = re.sub(r'^\s*>\s+(.+)$', r'<blockquote>\1</blockquote>', text, flags=re.MULTILINE)
+
+    # Clean up multiple blank lines
+    text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
+    # Ensure no trailing blank lines
+    text = text.strip()
+
+    return text

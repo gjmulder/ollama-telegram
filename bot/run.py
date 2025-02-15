@@ -9,6 +9,16 @@ import traceback
 import io
 import base64
 import sqlite3
+import re
+from func.interactions import convert_markdown_for_telegram
+import sys
+import logging
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+# Disable watchdog debug logging
+logging.getLogger('watchdog').setLevel(logging.WARNING)
+
 bot = Bot(token=token)
 dp = Dispatcher()
 start_kb = InlineKeyboardBuilder()
@@ -414,7 +424,9 @@ async def handle_response(message, response_data, full_response):
     if full_response_stripped == "":
         return
     if response_data.get("done"):
-        text = f"{full_response_stripped}\n\n⚙️ {modelname}\nGenerated in {response_data.get('total_duration') / 1e9:.2f}s."
+        # Convert markdown before adding model info
+        formatted_response = convert_markdown_for_telegram(full_response_stripped, message.chat.id < 0)
+        text = f"{formatted_response}\n\n⚙️ {modelname}\nGenerated in {response_data.get('total_duration') / 1e9:.2f}s."
         await send_response(message, text)
         async with ACTIVE_CHATS_LOCK:
             if ACTIVE_CHATS.get(message.from_user.id) is not None:
@@ -430,13 +442,17 @@ async def handle_response(message, response_data, full_response):
 async def send_response(message, text):
     # A negative message.chat.id is a group message
     if message.chat.id < 0 or message.chat.id == message.from_user.id:
-        await bot.send_message(chat_id=message.chat.id, text=text,parse_mode=ParseMode.MARKDOWN)
+        await bot.send_message(
+            chat_id=message.chat.id, 
+            text=text,
+            parse_mode=ParseMode.HTML
+        )
     else:
         await bot.edit_message_text(
             chat_id=message.chat.id,
             message_id=message.message_id,
             text=text,
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.HTML
         )
 
 async def ollama_request(message: types.Message, prompt: str = None):
@@ -497,11 +513,25 @@ async def ollama_request(message: types.Message, prompt: str = None):
             parse_mode=ParseMode.HTML,
         )
 
+class RestartHandler(FileSystemEventHandler):
+    def on_modified(self, event):
+        if event.src_path.endswith('.py'):
+            print(f"Python file changed: {event.src_path}")
+            print("Restarting application...")
+            sys.exit(0)  # Exit with success code to trigger restart
+
+async def setup_watchdog():
+    event_handler = RestartHandler()
+    observer = Observer()
+    observer.schedule(event_handler, path='.', recursive=True)
+    observer.start()
+
 async def main():
     init_db()
     allowed_ids = load_allowed_ids_from_db()
     print(f"allowed_ids: {allowed_ids}")
     await bot.set_my_commands(commands)
+    await setup_watchdog()  # Add watchdog setup
     await dp.start_polling(bot, skip_update=True)
 
 if __name__ == "__main__":
