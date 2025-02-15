@@ -15,6 +15,11 @@ import sys
 import logging
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+import json
+import os
+import signal
+from pathlib import Path
+import random
 
 # Disable watchdog debug logging
 logging.getLogger('watchdog').setLevel(logging.WARNING)
@@ -57,6 +62,7 @@ mention = None
 selected_prompt_id = None  # Variable to store the selected prompt ID
 CHAT_TYPE_GROUP = "group"
 CHAT_TYPE_SUPERGROUP = "supergroup"
+
 
 def init_db():
     conn = sqlite3.connect('users.db')
@@ -334,6 +340,11 @@ async def handle_message(message: types.Message):
         await ollama_request(message)
         return
 
+    # Randomly reply to 10% of chats where one's name isn't mentioned
+    if message.text and ("marv" in message.text.lower() or random.random() < 0.1):
+        await ollama_request(message)
+        return
+
     if await is_mentioned_in_group_or_supergroup(message):
         thread = await collect_message_thread(message)
         prompt = format_thread_for_prompt(thread)
@@ -385,15 +396,22 @@ async def process_image(message):
         image_base64 = base64.b64encode(image_buffer.getvalue()).decode("utf-8")
     return image_base64
 
+def get_chat_key(message: types.Message) -> str:
+    """Generate a unique key for each chat context"""
+    if message.chat.type == "private":
+        return f"private_{message.from_user.id}"
+    else:
+        return f"group_{message.chat.id}"  # Only use group ID for group chats
+
 async def add_prompt_to_active_chats(message, prompt, image_base64, modelname, system_prompt=None):
+    chat_key = get_chat_key(message)
     async with ACTIVE_CHATS_LOCK:
         # Prepare the messages list
         messages = []
         
         # Add system prompt if provided and not already present
         if system_prompt:
-            # Check if a system message already exists
-            existing_system_messages = [msg for msg in ACTIVE_CHATS.get(message.from_user.id, {}).get('messages', []) if msg.get('role') == 'system']
+            existing_system_messages = [msg for msg in ACTIVE_CHATS.get(chat_key, {}).get('messages', []) if msg.get('role') == 'system']
             
             if not existing_system_messages:
                 messages.append({
@@ -401,36 +419,42 @@ async def add_prompt_to_active_chats(message, prompt, image_base64, modelname, s
                     "content": system_prompt
                 })
         
-        # Add existing messages if the chat exists, excluding any existing system messages
-        if ACTIVE_CHATS.get(message.from_user.id):
-            messages.extend([msg for msg in ACTIVE_CHATS[message.from_user.id].get("messages", []) if msg.get('role') != 'system'])
+        # Add existing messages if the chat exists
+        if ACTIVE_CHATS.get(chat_key):
+            messages.extend([msg for msg in ACTIVE_CHATS[chat_key].get("messages", []) if msg.get('role') != 'system'])
         
-        # Add the new user message
+        # Add the new user message with user's first name for group chats
+        user_identifier = message.from_user.first_name if message.chat.type != "private" else ""
+        content_with_user = f"{user_identifier + ': ' if user_identifier else ''}{prompt}"
+        
         messages.append({
             "role": "user",
-            "content": prompt,
+            "content": content_with_user,
             "images": ([image_base64] if image_base64 else []),
         })
         
         # Update or create the active chat
-        ACTIVE_CHATS[message.from_user.id] = {
+        ACTIVE_CHATS[chat_key] = {
             "model": modelname,
             "messages": messages,
             "stream": True,
         }
 
 async def handle_response(message, response_data, full_response):
+    chat_key = get_chat_key(message)
     full_response_stripped = full_response.strip()
     if full_response_stripped == "":
         return
     if response_data.get("done"):
-        # Convert markdown before adding model info
+
         formatted_response = convert_markdown_for_telegram(full_response_stripped, message.chat.id < 0)
-        text = f"{formatted_response}\n\n⚙️ {modelname}\nGenerated in {response_data.get('total_duration') / 1e9:.2f}s."
+        if (message.chat.id > 0):
+            formatted_response = f"{formatted_response}\n\n⚙️ {modelname}\nGenerated in {response_data.get('total_duration') / 1e9:.2f}s."
+        text = formatted_response
         await send_response(message, text)
         async with ACTIVE_CHATS_LOCK:
-            if ACTIVE_CHATS.get(message.from_user.id) is not None:
-                ACTIVE_CHATS[message.from_user.id]["messages"].append(
+            if ACTIVE_CHATS.get(chat_key) is not None:
+                ACTIVE_CHATS[chat_key]["messages"].append(
                     {"role": "assistant", "content": full_response_stripped}
                 )
         logging.info(
@@ -489,8 +513,9 @@ async def ollama_request(message: types.Message, prompt: str = None):
             f"[OllamaAPI]: Processing '{prompt}' for {message.from_user.first_name} {message.from_user.last_name}"
         )
         
-        # Get the payload from active chats
-        payload = ACTIVE_CHATS.get(message.from_user.id)
+        # Get the chat key and payload
+        chat_key = get_chat_key(message)
+        payload = ACTIVE_CHATS.get(chat_key)
         
         # Generate response
         async for response_data in generate(payload, modelname, prompt):
@@ -526,12 +551,41 @@ async def setup_watchdog():
     observer.schedule(event_handler, path='.', recursive=True)
     observer.start()
 
+def save_context_to_db(chat_key):
+    """Save the active chat and settings to a JSON file"""
+    print(f"\nSaving context for {chat_key} to disk...")
+    
+    # Prepare data structure for saving
+    save_data = {
+        'active_chat': ACTIVE_CHATS.get(chat_key, {}),
+        'settings': {
+            'modelname': modelname,
+            'selected_prompt_id': selected_prompt_id
+        }
+    }
+    
+    # Save to JSON file with pretty printing
+    with open(f'./chats/{chat_key}.json', 'w', encoding='utf-8') as f:
+        json.dump(save_data, f, indent=2, ensure_ascii=False)
+    
+    print(f"Context for {chat_key} saved successfully!")
+
+def signal_handler(sig, frame):
+    """Handle Ctrl+C by saving context before exit"""
+    print("\nCtrl+C detected!")
+    for chat_key in ACTIVE_CHATS:
+        save_context_to_db(chat_key)
+    sys.exit(0)
+
 async def main():
+    # Register signal handler for Ctrl+C
+    signal.signal(signal.SIGINT, signal_handler)
+    
     init_db()
     allowed_ids = load_allowed_ids_from_db()
     print(f"allowed_ids: {allowed_ids}")
     await bot.set_my_commands(commands)
-    await setup_watchdog()  # Add watchdog setup
+    await setup_watchdog()
     await dp.start_polling(bot, skip_update=True)
 
 if __name__ == "__main__":

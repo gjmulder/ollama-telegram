@@ -237,12 +237,19 @@ def convert_markdown_for_telegram(text, is_group=False):
     Convert markdown text for Telegram into equivalent HTML formatting while escaping HTML special characters.
     Converts non-empty <think> tags to monospace format, removes empty ones.
     """
+
+    logging.debug(f"Converting markdown for Telegram: {text}")
+    
     # First escape HTML special characters except those already in HTML tags
     parts = re.split(r'(<[^>]*>)', text)
     for i in range(0, len(parts), 2):  # Only escape non-tag parts
         parts[i] = parts[i].replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
     text = ''.join(parts)
 
+    # Remove entire <think> some text </think> block if in a group chat
+    if is_group:
+        text = re.sub(r'<think>(.*?)</think>', '', text, flags=re.DOTALL)
+        
     # Remove empty think tags and convert non-empty ones to monospace
     text = re.sub(r'<think>\s*</think>\s*', '', text)  # Remove empty think tags
     text = re.sub(r'<think>(.*?)</think>',
