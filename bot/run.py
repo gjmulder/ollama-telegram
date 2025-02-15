@@ -486,6 +486,15 @@ def save_active_chat_context_to_db(chat_key, chat_context):
     conn.close()
     print(f"Active chat context for key '{chat_key}' saved to database.")
 
+async def send_response(message, text):
+    for page_text in text:
+        await bot.send_message(
+            chat_id=message.chat.id,
+            text=page_text,
+            parse_mode=ParseMode.HTML,
+            reply_to_message_id=message.message_id
+        )
+
 async def handle_response(message, response_data, full_response):
     chat_key = get_chat_key(message)
     full_response_stripped = full_response.strip()
@@ -495,7 +504,7 @@ async def handle_response(message, response_data, full_response):
 
         formatted_response = convert_markdown_for_telegram(full_response_stripped, message.chat.id < 0)
         if (message.chat.id > 0):
-            formatted_response = f"{formatted_response}\n\n⚙️ {modelname}\nGenerated in {response_data.get('total_duration') / 1e9:.2f}s."
+            formatted_response = [f"{page}\n\n⚙️ {modelname}\nGenerated in {response_data.get('total_duration') / 1e9:.2f}s." for page in formatted_response]
         text = formatted_response
         await send_response(message, text)
         async with ACTIVE_CHATS_LOCK:
@@ -507,16 +516,12 @@ async def handle_response(message, response_data, full_response):
             f"[Response]: '{full_response_stripped}' for {message.from_user.first_name} {message.from_user.last_name}"
         )
         save_active_chat_context_to_db(chat_key, ACTIVE_CHATS[chat_key])
+        if response_data.get('total_duration') and response_data.get('total_tokens'):
+            duration_sec = response_data.get('total_duration') / 1e9
+            tokens_per_sec = response_data.get('total_tokens') / duration_sec if duration_sec > 0 else 0
+            logging.info(f"[Token Usage] Model: {modelname}, Duration: {duration_sec:.2f}s, Tokens: {response_data.get('total_tokens')}, Throughput: {tokens_per_sec:.2f} tokens/sec")
         return True
     return False
-
-async def send_response(message, text):
-    await bot.send_message(
-        chat_id=message.chat.id,
-        text=text,
-        parse_mode=ParseMode.HTML,
-        reply_to_message_id=message.message_id
-    )
 
 async def ollama_request(message: types.Message, prompt: str = None):
     try:

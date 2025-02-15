@@ -88,7 +88,7 @@ def get_system_prompts(user_id=None, is_global=None):
     logging.debug(f"Retrieved prompts data: {prompts}")
     return prompts
 
-def delete_ystem_prompt(prompt_id):
+def delete_system_prompt(prompt_id):
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     c.execute("DELETE FROM system_prompts WHERE id = ?", (prompt_id,))
@@ -285,22 +285,22 @@ def convert_markdown_for_telegram(text, is_group=False):
     # Remove empty think tags and convert non-empty ones to monospace
     text = re.sub(r'<think>\s*</think>\s*', '', text)  # Remove empty think tags
     text = re.sub(r'<think>(.*?)</think>',
-                 lambda m: f'<code>{m.group(1).strip().replace("<", "&lt;").replace(">", "&gt;")}</code>' if m.group(1).strip() else '',
+                 lambda m: f'<code>{m.group(1).strip().replace("<", "&lt;").replace(">", "&gt;")}</code >' if m.group(1).strip() else '',
                  text, flags=re.DOTALL)
 
     # Handle code blocks first to prevent other formatting inside them
     def escape_code(match):
         code = match.group(1) if len(match.groups()) == 1 else match.group(2)
-        # Escape HTML in code blocks
+        # **Ensure HTML escaping within code blocks is robust**
         code = code.replace('<', '&lt;').replace('>', '&gt;')
         return f'<pre><code>{code}</code></pre>'
 
-    # Code blocks with language specification ```python
+    # Code blocks with language specification ```language
     text = re.sub(r'```(\w+)\n(.*?)```', escape_code, text, flags=re.DOTALL)
     # Regular code blocks ```
     text = re.sub(r'```(.*?)```', escape_code, text, flags=re.DOTALL)
     # Inline code `text`
-    text = re.sub(r'`(.*?)`', lambda m: f'<code>{m.group(1).replace("<", "&lt;").replace(">", "&gt;")}</code>', text)
+    text = re.sub(r'`(.*?)`', lambda m: f'<code>{m.group(1).replace("<", "&lt;").replace(">", "&gt;")}</code >', text)
 
     # Other formatting
     text = re.sub(r'(\*\*|__)(.*?)\1', lambda m: f'<b>{m.group(2)}</b>', text)
@@ -317,4 +317,29 @@ def convert_markdown_for_telegram(text, is_group=False):
     # Ensure no trailing blank lines
     text = text.strip()
 
-    return text
+    # Implement pagination here
+    MAX_MESSAGE_LENGTH = 4096
+    pages = []
+    current_page = ""
+    block_elements = re.split(r'(</p>|</div>|<pre>|</blockquote>|<ul>|<ol>)', text, flags=re.IGNORECASE) # Split by common block-level elements
+
+    for block in block_elements:
+        if not block:
+            continue
+
+        if len(current_page) + len(block) <= MAX_MESSAGE_LENGTH:
+            current_page += block
+        else:
+            pages.append(current_page)
+            current_page = block
+            while len(current_page) > MAX_MESSAGE_LENGTH: # Handle very long blocks by further splitting
+                split_point = current_page[:MAX_MESSAGE_LENGTH].rfind(' ') # Find last space to split at word boundary
+                if split_point == -1:
+                    split_point = MAX_MESSAGE_LENGTH # If no space, force split
+                pages.append(current_page[:split_point])
+                current_page = current_page[split_point:]
+
+    if current_page: # Add the last page
+        pages.append(current_page)
+
+    return pages
