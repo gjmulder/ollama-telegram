@@ -524,9 +524,12 @@ async def handle_response(message, response_data, full_response):
     return False
 
 async def ollama_request(message: types.Message, prompt: str = None):
+    user_full_name = f"{message.from_user.first_name} {message.from_user.last_name}"
+    user_id = message.from_user.id
+    chat_key = get_chat_key(message)
     try:
         full_response = ""
-        await bot.send_chat_action(message.chat.id, "typing")
+        await bot.send_chat_action(message.chat.id, "typing") # Start typing here
         image_base64 = await process_image(message)
         
         # Determine the prompt
@@ -554,11 +557,10 @@ async def ollama_request(message: types.Message, prompt: str = None):
         await add_prompt_to_active_chats(message, prompt, image_base64, modelname, system_prompt)
         
         logging.info(
-            f"[OllamaAPI]: Processing '{prompt}' for {message.from_user.first_name} {message.from_user.last_name}"
+            f"[OllamaAPI]: Processing '{prompt}' for {user_full_name}"
         )
         
         # Get the chat key and payload
-        chat_key = get_chat_key(message)
         async with ACTIVE_CHATS_LOCK:
             payload = ACTIVE_CHATS.get(chat_key)
         payload["selected_prompt_id"] = selected_prompt_id
@@ -583,6 +585,8 @@ async def ollama_request(message: types.Message, prompt: str = None):
             text=f"Something went wrong: {str(e)}",
             parse_mode=ParseMode.HTML,
         )
+    finally:
+        await bot.send_chat_action(message.chat.id, "cancel") # Stop typing in finally block
 
 def save_context_to_db(chat_key):
     """Save the active chat to DB"""
