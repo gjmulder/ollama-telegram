@@ -13,8 +13,6 @@ import re
 from func.interactions import convert_markdown_for_telegram
 import sys
 import logging
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
 import json
 import os
 import signal
@@ -63,7 +61,6 @@ selected_prompt_id = None  # Variable to store the selected prompt ID
 CHAT_TYPE_GROUP = "group"
 CHAT_TYPE_SUPERGROUP = "supergroup"
 
-
 def init_db():
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
@@ -83,6 +80,21 @@ def init_db():
                   is_global BOOLEAN,
                   timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                   FOREIGN KEY (user_id) REFERENCES users(id))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS global_settings
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  modelname TEXT,
+                  selected_prompt_id INTEGER)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS active_chat_contexts
+                 (chat_key TEXT PRIMARY KEY,
+                  modelname TEXT,
+                  selected_prompt_id INTEGER,
+                  messages_json TEXT,
+                  stream BOOLEAN)''')
+
+    # Initialize global settings if not exist
+    c.execute("SELECT COUNT(*) FROM global_settings")
+    if c.fetchone()[0] == 0:
+        c.execute("INSERT INTO global_settings (modelname, selected_prompt_id) VALUES (?, ?)", (modelname, selected_prompt_id))
     conn.commit()
     conn.close()
 
@@ -220,6 +232,7 @@ async def switchllm_callback_handler(query: types.CallbackQuery):
     await query.message.edit_text(
         f"{len(models)} models available.\n🦙 = Regular\n🦙📷 = Multimodal", reply_markup=switchllm_builder.as_markup(),
     )
+    save_global_settings_to_db()
 
 @dp.callback_query(lambda query: query.data.startswith("model_"))
 async def model_callback_handler(query: types.CallbackQuery):
@@ -227,6 +240,7 @@ async def model_callback_handler(query: types.CallbackQuery):
     global modelfamily
     modelname = query.data.split("model_")[1]
     await query.answer(f"Chosen model: {modelname}")
+    save_global_settings_to_db()
 
 @dp.callback_query(lambda query: query.data == "about")
 @perms_admins
@@ -279,12 +293,32 @@ async def select_prompt_callback_handler(query: types.CallbackQuery):
     await query.message.edit_text(
         f"{len(prompts)} system prompts available.", reply_markup=prompt_kb.as_markup()
     )
+    save_global_settings_to_db()
+
+    async with ACTIVE_CHATS_LOCK:
+        for chat_key in ACTIVE_CHATS:
+            ACTIVE_CHATS[chat_key]["selected_prompt_id"] = selected_prompt_id
 
 @dp.callback_query(lambda query: query.data.startswith("prompt_"))
 async def prompt_callback_handler(query: types.CallbackQuery):
     global selected_prompt_id
-    selected_prompt_id = int(query.data.split("prompt_")[1])
-    await query.answer(f"Selected prompt ID: {selected_prompt_id}")
+    prompt_id = int(query.data.split("prompt_")[1])
+    selected_prompt_id = prompt_id
+    save_global_settings_to_db()
+
+    # Fetch the selected prompt text from the database
+    prompts = get_system_prompts(user_id=query.from_user.id)
+    selected_prompt_name = "Unknown Prompt"  # Default value if prompt not found
+    for prompt in prompts:
+        if prompt[0] == prompt_id:
+            selected_prompt_name = prompt[2]  # prompt[2] is the prompt text
+            break
+
+    await query.answer(f"System Prompt '{selected_prompt_name}' selected!", show_alert=True)
+
+    async with ACTIVE_CHATS_LOCK:
+        for chat_key in ACTIVE_CHATS:
+            ACTIVE_CHATS[chat_key]["selected_prompt_id"] = selected_prompt_id
 
 @dp.callback_query(lambda query: query.data == "delete_prompt")
 async def delete_prompt_callback_handler(query: types.CallbackQuery):
@@ -304,7 +338,7 @@ async def delete_prompt_callback_handler(query: types.CallbackQuery):
 @dp.callback_query(lambda query: query.data.startswith("delete_prompt_"))
 async def delete_prompt_confirm_handler(query: types.CallbackQuery):
     prompt_id = int(query.data.split("delete_prompt_")[1])
-    delete_ystem_prompt(prompt_id)
+    delete_system_prompt(prompt_id)
     await query.answer(f"Deleted prompt ID: {prompt_id}")
 
 @dp.callback_query(lambda query: query.data == "delete_model")
@@ -438,7 +472,19 @@ async def add_prompt_to_active_chats(message, prompt, image_base64, modelname, s
             "model": modelname,
             "messages": messages,
             "stream": True,
+            "selected_prompt_id": selected_prompt_id
         }
+        save_active_chat_context_to_db(chat_key, ACTIVE_CHATS[chat_key])
+
+def save_active_chat_context_to_db(chat_key, chat_context):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    messages_json = json.dumps(chat_context["messages"]) if chat_context.get("messages") else None
+    c.execute("REPLACE INTO active_chat_contexts (chat_key, modelname, selected_prompt_id, messages_json, stream) VALUES (?, ?, ?, ?, ?)",
+              (chat_key, chat_context["model"], chat_context.get("selected_prompt_id"), messages_json, chat_context["stream"]))
+    conn.commit()
+    conn.close()
+    print(f"Active chat context for key '{chat_key}' saved to database.")
 
 async def handle_response(message, response_data, full_response):
     chat_key = get_chat_key(message)
@@ -460,24 +506,17 @@ async def handle_response(message, response_data, full_response):
         logging.info(
             f"[Response]: '{full_response_stripped}' for {message.from_user.first_name} {message.from_user.last_name}"
         )
+        save_active_chat_context_to_db(chat_key, ACTIVE_CHATS[chat_key])
         return True
     return False
 
 async def send_response(message, text):
-    # A negative message.chat.id is a group message
-    if message.chat.id < 0 or message.chat.id == message.from_user.id:
-        await bot.send_message(
-            chat_id=message.chat.id, 
-            text=text,
-            parse_mode=ParseMode.HTML
-        )
-    else:
-        await bot.edit_message_text(
-            chat_id=message.chat.id,
-            message_id=message.message_id,
-            text=text,
-            parse_mode=ParseMode.HTML
-        )
+    await bot.send_message(
+        chat_id=message.chat.id,
+        text=text,
+        parse_mode=ParseMode.HTML,
+        reply_to_message_id=message.message_id
+    )
 
 async def ollama_request(message: types.Message, prompt: str = None):
     try:
@@ -515,7 +554,9 @@ async def ollama_request(message: types.Message, prompt: str = None):
         
         # Get the chat key and payload
         chat_key = get_chat_key(message)
-        payload = ACTIVE_CHATS.get(chat_key)
+        async with ACTIVE_CHATS_LOCK:
+            payload = ACTIVE_CHATS.get(chat_key)
+        payload["selected_prompt_id"] = selected_prompt_id
         
         # Generate response
         async for response_data in generate(payload, modelname, prompt):
@@ -538,55 +579,125 @@ async def ollama_request(message: types.Message, prompt: str = None):
             parse_mode=ParseMode.HTML,
         )
 
-class RestartHandler(FileSystemEventHandler):
-    def on_modified(self, event):
-        if event.src_path.endswith('.py'):
-            print(f"Python file changed: {event.src_path}")
-            print("Restarting application...")
-            sys.exit(0)  # Exit with success code to trigger restart
-
-async def setup_watchdog():
-    event_handler = RestartHandler()
-    observer = Observer()
-    observer.schedule(event_handler, path='.', recursive=True)
-    observer.start()
-
 def save_context_to_db(chat_key):
-    """Save the active chat and settings to a JSON file"""
-    print(f"\nSaving context for {chat_key} to disk...")
-    
-    # Prepare data structure for saving
-    save_data = {
-        'active_chat': ACTIVE_CHATS.get(chat_key, {}),
-        'settings': {
-            'modelname': modelname,
-            'selected_prompt_id': selected_prompt_id
-        }
-    }
-    
-    # Save to JSON file with pretty printing
-    with open(f'./chats/{chat_key}.json', 'w', encoding='utf-8') as f:
-        json.dump(save_data, f, indent=2, ensure_ascii=False)
-    
+    """Save the active chat to DB"""
+    print(f"\nSaving context for {chat_key} to database...")
+    save_active_chat_context_to_db(chat_key, ACTIVE_CHATS.get(chat_key, {}))
     print(f"Context for {chat_key} saved successfully!")
 
 def signal_handler(sig, frame):
     """Handle Ctrl+C by saving context before exit"""
     print("\nCtrl+C detected!")
-    for chat_key in ACTIVE_CHATS:
-        save_context_to_db(chat_key)
+    save_global_settings_to_db()
+    save_active_chats_to_db()
     sys.exit(0)
+
+def load_global_settings_from_db():
+    global modelname
+    global selected_prompt_id
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("SELECT modelname, selected_prompt_id FROM global_settings LIMIT 1")
+    settings = c.fetchone()
+    if settings:
+        modelname, db_selected_prompt_id = settings
+        selected_prompt_id = int(db_selected_prompt_id) if db_selected_prompt_id is not None else None
+    else:
+        print("No settings found in global_settings table.")
+
+    # Load SYSTEM_PROMPT from env
+    env_system_prompt = os.getenv("SYSTEM_PROMPT")
+    print(f"SYSTEM_PROMPT from .env: '{env_system_prompt}'")
+
+    if env_system_prompt and selected_prompt_id is None:
+        print("Condition 'env_system_prompt and selected_prompt_id is None' is TRUE - Checking for existing prompt...")
+        # Check if a system prompt with this text already exists
+        c.execute("SELECT id FROM system_prompts WHERE prompt = ?", (env_system_prompt,))
+        existing_prompt = c.fetchone()
+
+        if existing_prompt:
+            selected_prompt_id = existing_prompt[0]
+            print(f"Existing system prompt found, using ID: {selected_prompt_id}")
+        else:
+            print("No existing system prompt found, creating a new one...")
+            # Create a new system prompt
+            c.execute("INSERT INTO system_prompts (prompt, user_id, is_global) VALUES (?, ?, ?)", (env_system_prompt, None, True))
+            selected_prompt_id = c.lastrowid
+            print(f"Created new system prompt from .env with ID: {selected_prompt_id}")
+            conn.commit() # Commit here to save the newly inserted prompt
+    else:
+        print("Condition 'env_system_prompt and selected_prompt_id is None' is FALSE - Skipping default prompt loading.")
+
+    conn.close()
+    print(f"Global settings loaded from database: modelname={modelname}, selected_prompt_id={selected_prompt_id}")
+
+def save_global_settings_to_db():
+    global modelname
+    global selected_prompt_id
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("UPDATE global_settings SET modelname = ?, selected_prompt_id = ?", (modelname, selected_prompt_id))
+    conn.commit()
+    conn.close()
+    print(f"Global settings saved to database: modelname={modelname}, selected_prompt_id={selected_prompt_id}")
+
+def load_active_chats_from_db():
+    global ACTIVE_CHATS
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("SELECT chat_key, modelname, selected_prompt_id, messages_json, stream FROM active_chat_contexts")
+    rows = c.fetchall()
+    for row in rows:
+        chat_key, db_modelname, db_selected_prompt_id, messages_json, stream = row
+        messages = json.loads(messages_json) if messages_json else []
+        ACTIVE_CHATS[chat_key] = {
+            "model": db_modelname,
+            "messages": messages,
+            "stream": bool(stream),
+        }
+        if db_selected_prompt_id is not None:
+            ACTIVE_CHATS[chat_key]["selected_prompt_id"] = int(db_selected_prompt_id)
+        else:
+            ACTIVE_CHATS[chat_key]["selected_prompt_id"] = None
+    conn.close()
+    print(f"Active chats loaded from database. Count: {len(ACTIVE_CHATS)}")
+
+def save_active_chats_to_db():
+    global ACTIVE_CHATS
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("DELETE FROM active_chat_contexts")
+    for chat_key, chat_data in ACTIVE_CHATS.items():
+        messages_json = json.dumps(chat_data["messages"]) if chat_data.get("messages") else None
+        c.execute("INSERT INTO active_chat_contexts (chat_key, modelname, selected_prompt_id, messages_json, stream) VALUES (?, ?, ?, ?, ?)",
+                  (chat_key, chat_data["model"], chat_data.get("selected_prompt_id"), messages_json, chat_data["stream"]))
+    conn.commit()
+    conn.close()
+    print(f"Active chats saved to database. Count: {len(ACTIVE_CHATS)}")
+
+def delete_active_chat_context_from_db(chat_key):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("DELETE FROM active_chat_contexts WHERE chat_key = ?", (chat_key,))
+    conn.commit()
+    conn.close()
+    print(f"Active chat context for key '{chat_key}' deleted from database.")
 
 async def main():
     # Register signal handler for Ctrl+C
     signal.signal(signal.SIGINT, signal_handler)
     
     init_db()
+    load_global_settings_from_db()
+    load_active_chats_from_db()
     allowed_ids = load_allowed_ids_from_db()
     print(f"allowed_ids: {allowed_ids}")
     await bot.set_my_commands(commands)
-    await setup_watchdog()
-    await dp.start_polling(bot, skip_update=True)
+    try:
+        await dp.start_polling(bot, skip_update=True)
+    except Exception as e:
+        logging.error(f"Error during polling: {e}", exc_info=True)
+        print(f"Bot polling stopped due to error: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
