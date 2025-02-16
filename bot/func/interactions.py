@@ -278,6 +278,12 @@ def convert_markdown_for_telegram(text, is_group=False):
         parts[i] = parts[i].replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
     text = ''.join(parts)
 
+    # Remove "Marvin: " from the beginning of the text
+    text = re.sub(r'^Marvin: ', '', text)
+
+    # Remove the first set of matched double quotes, if present
+    text = re.sub(r'^"(.*?)"', r'\1', text, count=1)
+
     # Remove entire <think> some text </think> block if in a group chat
     if is_group:
         text = re.sub(r'<think>(.*?)</think>', '', text, flags=re.DOTALL)
