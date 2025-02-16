@@ -412,7 +412,7 @@ async def set_temperature_command(message: types.Message):
             chat_key = get_chat_key(message)
             async with ACTIVE_CHATS_LOCK:
                 if chat_key not in ACTIVE_CHATS:
-                    ACTIVE_CHATS[chat_key] = {"model": modelname, "temperature": temp, "stream": True, "selected_prompt_id": selected_prompt_id}
+                    ACTIVE_CHATS[chat_key] = {"model": modelname, "temperature": temp, "stream": True, "selected_prompt_id": selected_prompt_id, "messages": []}
                 else:
                     ACTIVE_CHATS[chat_key]["temperature"] = temp
                 logging.info(f"Temperature set for chat_key: {chat_key}, temperature: {ACTIVE_CHATS[chat_key]['temperature']}")
@@ -497,48 +497,50 @@ def get_chat_key(message: types.Message) -> str:
 async def add_prompt_to_active_chats(message, prompt, image_base64, modelname, system_prompt=None):
     chat_key = get_chat_key(message)
     async with ACTIVE_CHATS_LOCK:
-        # Prepare the messages list
-        messages = []
-        
-        # Add system prompt if provided and not already present
-        if system_prompt:
-            existing_system_messages = [msg for msg in ACTIVE_CHATS.get(chat_key, {}).get('messages', []) if msg.get('role') == 'system']
-            
-            if not existing_system_messages:
-                messages.append({
-                    "role": "system",
-                    "content": system_prompt
-                })
-        
-        # Add existing messages if the chat exists
-        if ACTIVE_CHATS.get(chat_key):
-            messages.extend([msg for msg in ACTIVE_CHATS[chat_key].get("messages", []) if msg.get('role') != 'system'])
-        
-        # Add the new user message with user's first name for group chats
-        user_identifier = message.from_user.first_name if message.chat.type != "private" else ""
-        content_with_user = f"{user_identifier + ': ' if user_identifier else ''}{prompt}"
-        
-        messages.append({
-            "role": "user",
-            "content": content_with_user,
-            "images": ([image_base64] if image_base64 else []),
-        })
-        
-        # Initialize missing keys with default values
-        if "stream" not in ACTIVE_CHATS.get(chat_key, {}):
-            ACTIVE_CHATS[chat_key]["stream"] = True
-        if "selected_prompt_id" not in ACTIVE_CHATS.get(chat_key, {}):
-            ACTIVE_CHATS[chat_key]["selected_prompt_id"] = selected_prompt_id
-        if "temperature" not in ACTIVE_CHATS.get(chat_key, {}):
-            ACTIVE_CHATS[chat_key]["temperature"] = DEFAULT_TEMPERATURE
+        # 1. Get existing chat context, or create a new one if it doesn't exist
+        if chat_key not in ACTIVE_CHATS:
+            ACTIVE_CHATS[chat_key] = {
+                "model": modelname,
+                "messages": [],  # Initialize messages as an empty list
+                "stream": True,
+                "temperature": DEFAULT_TEMPERATURE,  # Initialize temperature
+                # selected_prompt_id is managed globally, no need to initialize here
+            }
 
-        ACTIVE_CHATS[chat_key] = {
-            "model": modelname,
-            "messages": messages,
-            "stream": True,
-            "selected_prompt_id": selected_prompt_id,
-            "temperature": DEFAULT_TEMPERATURE,
-        }
+        # 2. Prepare the messages list:  Append to existing messages, don't overwrite
+        messages = ACTIVE_CHATS[chat_key]["messages"]
+
+        # 3. Add system prompt if provided and not already present
+        if system_prompt:
+            # Check if a system prompt already exists.  Only add if it doesn't.
+            existing_system_messages = [
+                msg for msg in messages if msg.get("role") == "system"
+            ]
+            if not existing_system_messages:
+                messages.append({"role": "system", "content": system_prompt})
+
+        # 4. Add the new user message
+        user_identifier = (
+            message.from_user.first_name if message.chat.type != "private" else ""
+        )
+        content_with_user = (
+            f"{user_identifier + ': ' if user_identifier else ''}{prompt}"
+        )
+        messages.append(
+            {
+                "role": "user",
+                "content": content_with_user,
+                "images": [image_base64] if image_base64 else [],
+            }
+        )
+
+        # 5. Update the ACTIVE_CHATS dictionary *after* modifying the messages list
+        ACTIVE_CHATS[chat_key]["messages"] = messages
+        ACTIVE_CHATS[chat_key]["model"] = modelname  # Update model if needed
+
+        # 6.  *Don't* re-initialize temperature here.  It's already handled.
+
+        # 7. Save to DB *after* all changes
         save_active_chat_context_to_db(chat_key, ACTIVE_CHATS[chat_key])
 
 def save_active_chat_context_to_db(chat_key, chat_context):
