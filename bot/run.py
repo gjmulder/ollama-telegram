@@ -51,6 +51,7 @@ commands = [
     types.BotCommand(command="pullmodel", description="Pull a model from Ollama"),
     types.BotCommand(command="addglobalprompt", description="Add a global prompt"),
     types.BotCommand(command="addprivateprompt", description="Add a private prompt"),
+    types.BotCommand(command="temp", description="Set Temperature"),
 ]
 
 ACTIVE_CHATS = {}
@@ -60,6 +61,14 @@ mention = None
 selected_prompt_id = None  # Variable to store the selected prompt ID
 CHAT_TYPE_GROUP = "group"
 CHAT_TYPE_SUPERGROUP = "supergroup"
+
+timeout = os.getenv("TIMEOUT", "3000")
+global DEFAULT_TEMPERATURE
+DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.7"))
+if log_level_str not in log_levels:
+    log_level = logging.DEBUG
+else:
+    log_level = logging.getLevelName(log_level_str)
 
 def init_db():
     conn = sqlite3.connect('users.db')
@@ -247,9 +256,39 @@ async def model_callback_handler(query: types.CallbackQuery):
 async def about_callback_handler(query: types.CallbackQuery):
     dotenv_model = os.getenv("INITMODEL")
     global modelname
+    global selected_prompt_id
+    global DEFAULT_TEMPERATURE
+
+    # Fetch the selected prompt name
+    selected_prompt_name = "None"
+    if selected_prompt_id is not None:
+        prompts = get_system_prompts(user_id=query.from_user.id, is_global=None)
+        for prompt in prompts:
+            if prompt[0] == selected_prompt_id:
+                selected_prompt_name = prompt[2]  # prompt[2] is the prompt text
+                break
+
+    # Get the current chat key
+    chat_key = get_chat_key(query.message)
+
+    # Fetch current temperature for the chat
+    current_temperature = DEFAULT_TEMPERATURE  # Default value
+    async with ACTIVE_CHATS_LOCK:
+        if chat_key in ACTIVE_CHATS:
+            current_temperature = ACTIVE_CHATS[chat_key].get("temperature", DEFAULT_TEMPERATURE)
+
     await bot.send_message(
         chat_id=query.message.chat.id,
-        text=f"<b>Your LLMs</b>\nCurrently using: <code>{modelname}</code>\nDefault in .env: <code>{dotenv_model}</code>\nThis project is under <a href='https://github.com/ruecat/ollama-telegram/blob/main/LICENSE'>MIT License.</a>\n<a href='https://github.com/ruecat/ollama-telegram'>Source Code</a>",
+        text=f"""<b><u>Bot Info</u></b>
+
+<b>Current Model:</b> <code>{modelname}</code>
+<b>Default Model (.env):</b> <code>{dotenv_model}</code>
+
+<b>Selected Prompt:</b> <code>{selected_prompt_name}</code>
+<b>Current Temperature:</b> <code>{current_temperature}</code>
+
+This project is under <a href='https://github.com/ruecat/ollama-telegram/blob/main/LICENSE'>MIT License.</a>
+<a href='https://github.com/ruecat/ollama-telegram'>Source Code</a>""",
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
@@ -365,6 +404,24 @@ async def delete_model_confirm_handler(query: types.CallbackQuery):
     else:
         await query.answer(f"Failed to delete model: {modelname}")
 
+@dp.message(Command("temp"))
+async def set_temperature_command(message: types.Message):
+    try:
+        temp = float(message.text.split(maxsplit=1)[1])
+        if 0.0 <= temp <= 1.0:
+            chat_key = get_chat_key(message)
+            async with ACTIVE_CHATS_LOCK:
+                if chat_key not in ACTIVE_CHATS:
+                    ACTIVE_CHATS[chat_key] = {"model": modelname, "temperature": temp, "stream": True, "selected_prompt_id": selected_prompt_id}
+                else:
+                    ACTIVE_CHATS[chat_key]["temperature"] = temp
+                logging.info(f"Temperature set for chat_key: {chat_key}, temperature: {ACTIVE_CHATS[chat_key]['temperature']}")
+            await message.answer(f"Temperature set to {temp} for this chat.")
+        else:
+            await message.answer("Temperature must be between 0.0 and 1.0.")
+    except (ValueError, IndexError):
+        await message.answer("Usage: /temp [temperature value between 0.0 and 1.0]")
+
 @dp.message()
 @perms_allowed
 async def handle_message(message: types.Message):
@@ -467,12 +524,20 @@ async def add_prompt_to_active_chats(message, prompt, image_base64, modelname, s
             "images": ([image_base64] if image_base64 else []),
         })
         
-        # Update or create the active chat
+        # Initialize missing keys with default values
+        if "stream" not in ACTIVE_CHATS.get(chat_key, {}):
+            ACTIVE_CHATS[chat_key]["stream"] = True
+        if "selected_prompt_id" not in ACTIVE_CHATS.get(chat_key, {}):
+            ACTIVE_CHATS[chat_key]["selected_prompt_id"] = selected_prompt_id
+        if "temperature" not in ACTIVE_CHATS.get(chat_key, {}):
+            ACTIVE_CHATS[chat_key]["temperature"] = DEFAULT_TEMPERATURE
+
         ACTIVE_CHATS[chat_key] = {
             "model": modelname,
             "messages": messages,
             "stream": True,
-            "selected_prompt_id": selected_prompt_id
+            "selected_prompt_id": selected_prompt_id,
+            "temperature": DEFAULT_TEMPERATURE,
         }
         save_active_chat_context_to_db(chat_key, ACTIVE_CHATS[chat_key])
 
@@ -564,9 +629,10 @@ async def ollama_request(message: types.Message, prompt: str = None):
         async with ACTIVE_CHATS_LOCK:
             payload = ACTIVE_CHATS.get(chat_key)
         payload["selected_prompt_id"] = selected_prompt_id
+        temperature = payload.get("temperature")
         
         # Generate response
-        async for response_data in generate(payload, modelname, prompt):
+        async for response_data in generate(payload, modelname, prompt, temperature=temperature):
             msg = response_data.get("message")
             if msg is None:
                 continue
@@ -643,12 +709,13 @@ def load_global_settings_from_db():
 def save_global_settings_to_db():
     global modelname
     global selected_prompt_id
+    global DEFAULT_TEMPERATURE
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
-    c.execute("UPDATE global_settings SET modelname = ?, selected_prompt_id = ?", (modelname, selected_prompt_id))
+    c.execute("UPDATE global_settings SET modelname = ?, selected_prompt_id = ?, temperature = ?", (modelname, selected_prompt_id, DEFAULT_TEMPERATURE))
     conn.commit()
     conn.close()
-    print(f"Global settings saved to database: modelname={modelname}, selected_prompt_id={selected_prompt_id}")
+    print(f"Global settings saved to database: modelname={modelname}, selected_prompt_id={selected_prompt_id}, temperature={DEFAULT_TEMPERATURE}")
 
 def load_active_chats_from_db():
     global ACTIVE_CHATS

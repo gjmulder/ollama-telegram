@@ -105,7 +105,7 @@ async def model_list():
             else:
                 return []
                 
-async def generate(payload: dict, modelname: str, prompt: str):
+async def generate(payload: dict, modelname: str, prompt: str, temperature: float = 0.7):
     client_timeout = ClientTimeout(total=int(timeout))
     async with aiohttp.ClientSession(timeout=client_timeout) as session:
         url = f"http://{ollama_base_url}:{ollama_port}/api/chat"
@@ -114,7 +114,8 @@ async def generate(payload: dict, modelname: str, prompt: str):
         ollama_payload = {
             "model": modelname,
             "messages": payload.get("messages", []),
-            "stream": payload.get("stream", True)
+            "stream": payload.get("stream", True),
+            "options": {"temperature": temperature}  # Add temperature to options
         }
 
         try:
