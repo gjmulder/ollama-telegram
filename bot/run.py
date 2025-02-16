@@ -18,6 +18,7 @@ import os
 import signal
 from pathlib import Path
 import random
+from func.db_queries import *
 
 # Disable watchdog debug logging
 logging.getLogger('watchdog').setLevel(logging.WARNING)
@@ -73,51 +74,31 @@ else:
 def init_db():
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (id INTEGER PRIMARY KEY, name TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS chats
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  user_id INTEGER,
-                  role TEXT,
-                  content TEXT,
-                  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                  FOREIGN KEY (user_id) REFERENCES users(id))''')
-    c.execute('''CREATE TABLE IF NOT EXISTS system_prompts
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  user_id INTEGER,
-                  prompt TEXT,
-                  is_global BOOLEAN,
-                  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                  FOREIGN KEY (user_id) REFERENCES users(id))''')
-    c.execute('''CREATE TABLE IF NOT EXISTS global_settings
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  modelname TEXT,
-                  selected_prompt_id INTEGER)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS active_chat_contexts
-                 (chat_key TEXT PRIMARY KEY,
-                  modelname TEXT,
-                  selected_prompt_id INTEGER,
-                  messages_json TEXT,
-                  stream BOOLEAN)''')
+    c.execute(init_db_query)
+    c.execute(create_users_table_query)
+    c.execute(create_chats_table_query)
+    c.execute(create_system_prompts_table_query)
+    c.execute(create_global_settings_table_query)
+    c.execute(create_active_chat_contexts_table_query)
 
     # Initialize global settings if not exist
-    c.execute("SELECT COUNT(*) FROM global_settings")
+    c.execute(select_count_global_settings_query)
     if c.fetchone()[0] == 0:
-        c.execute("INSERT INTO global_settings (modelname, selected_prompt_id) VALUES (?, ?)", (modelname, selected_prompt_id))
+        c.execute(insert_global_settings_query, (modelname, selected_prompt_id))
     conn.commit()
     conn.close()
 
 def register_user(user_id, user_name):
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO users VALUES (?, ?)", (user_id, user_name))
+    c.execute(insert_or_replace_users_query, (user_id, user_name))
     conn.commit()
     conn.close()
 
 def save_chat_message(user_id, role, content):
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
-    c.execute("INSERT INTO chats (user_id, role, content) VALUES (?, ?, ?)",
+    c.execute(insert_chats_query,
               (user_id, role, content))
     conn.commit()
     conn.close()
@@ -161,8 +142,9 @@ async def command_reset_handler(message: Message) -> None:
 @dp.message(Command("history"))
 async def command_get_context_handler(message: Message) -> None:
     if message.from_user.id in allowed_ids:
-        if message.from_user.id in ACTIVE_CHATS:
-            messages = ACTIVE_CHATS.get(message.chat.id)["messages"]
+        chat_key = get_chat_key(message)
+        if chat_key in ACTIVE_CHATS:
+            messages = ACTIVE_CHATS.get(chat_key)["messages"]
             context = ""
             for msg in messages:
                 context += f"*{msg['role'].capitalize()}*: {msg['content']}\n"
@@ -547,7 +529,7 @@ def save_active_chat_context_to_db(chat_key, chat_context):
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     messages_json = json.dumps(chat_context["messages"]) if chat_context.get("messages") else None
-    c.execute("REPLACE INTO active_chat_contexts (chat_key, modelname, selected_prompt_id, messages_json, stream) VALUES (?, ?, ?, ?, ?)",
+    c.execute(replace_active_chat_contexts_query,
               (chat_key, chat_context["model"], chat_context.get("selected_prompt_id"), messages_json, chat_context["stream"]))
     conn.commit()
     conn.close()
@@ -674,7 +656,7 @@ def load_global_settings_from_db():
     global selected_prompt_id
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
-    c.execute("SELECT modelname, selected_prompt_id FROM global_settings LIMIT 1")
+    c.execute(select_global_settings_limit_1_query)
     settings = c.fetchone()
     if settings:
         modelname, db_selected_prompt_id = settings
@@ -689,7 +671,7 @@ def load_global_settings_from_db():
     if env_system_prompt and selected_prompt_id is None:
         print("Condition 'env_system_prompt and selected_prompt_id is None' is TRUE - Checking for existing prompt...")
         # Check if a system prompt with this text already exists
-        c.execute("SELECT id FROM system_prompts WHERE prompt = ?", (env_system_prompt,))
+        c.execute(select_id_from_system_prompts_query, (env_system_prompt,))
         existing_prompt = c.fetchone()
 
         if existing_prompt:
@@ -698,7 +680,7 @@ def load_global_settings_from_db():
         else:
             print("No existing system prompt found, creating a new one...")
             # Create a new system prompt
-            c.execute("INSERT INTO system_prompts (prompt, user_id, is_global) VALUES (?, ?, ?)", (env_system_prompt, None, True))
+            c.execute(insert_system_prompts_query, (env_system_prompt, None, True))
             selected_prompt_id = c.lastrowid
             print(f"Created new system prompt from .env with ID: {selected_prompt_id}")
             conn.commit() # Commit here to save the newly inserted prompt
@@ -714,7 +696,7 @@ def save_global_settings_to_db():
     global DEFAULT_TEMPERATURE
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
-    c.execute("UPDATE global_settings SET modelname = ?, selected_prompt_id = ?, temperature = ?", (modelname, selected_prompt_id, DEFAULT_TEMPERATURE))
+    c.execute(update_global_settings_query, (modelname, selected_prompt_id, DEFAULT_TEMPERATURE))
     conn.commit()
     conn.close()
     print(f"Global settings saved to database: modelname={modelname}, selected_prompt_id={selected_prompt_id}, temperature={DEFAULT_TEMPERATURE}")
@@ -723,7 +705,7 @@ def load_active_chats_from_db():
     global ACTIVE_CHATS
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
-    c.execute("SELECT chat_key, modelname, selected_prompt_id, messages_json, stream FROM active_chat_contexts")
+    c.execute(select_active_chat_contexts_query)
     rows = c.fetchall()
     for row in rows:
         chat_key, db_modelname, db_selected_prompt_id, messages_json, stream = row
@@ -744,10 +726,10 @@ def save_active_chats_to_db():
     global ACTIVE_CHATS
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
-    c.execute("DELETE FROM active_chat_contexts")
+    c.execute(delete_active_chat_contexts_query)
     for chat_key, chat_data in ACTIVE_CHATS.items():
         messages_json = json.dumps(chat_data["messages"]) if chat_data.get("messages") else None
-        c.execute("INSERT INTO active_chat_contexts (chat_key, modelname, selected_prompt_id, messages_json, stream) VALUES (?, ?, ?, ?, ?)",
+        c.execute(insert_active_chat_contexts_query,
                   (chat_key, chat_data["model"], chat_data.get("selected_prompt_id"), messages_json, chat_data["stream"]))
     conn.commit()
     conn.close()
@@ -756,7 +738,7 @@ def save_active_chats_to_db():
 def delete_active_chat_context_from_db(chat_key):
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
-    c.execute("DELETE FROM active_chat_contexts WHERE chat_key = ?", (chat_key,))
+    c.execute(delete_active_chat_context_by_key_query, (chat_key,))
     conn.commit()
     conn.close()
     print(f"Active chat context for key '{chat_key}' deleted from database.")
