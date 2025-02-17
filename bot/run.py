@@ -16,6 +16,7 @@ import signal
 from pathlib import Path
 import random
 from func.db_queries import *
+from func.interactions import OllamaAPIClient
 
 # Disable watchdog debug logging
 logging.getLogger('watchdog').setLevel(logging.WARNING)
@@ -128,6 +129,9 @@ if log_level_str not in log_levels:
 else:
     log_level = logging.getLevelName(log_level_str)
 
+# Initialize Ollama API Client
+ollama_client = OllamaAPIClient(ollama_base_url, ollama_port)
+
 def init_db():
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
@@ -238,7 +242,7 @@ async def pull_model_handler(message: Message) -> None:
     model_name = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else None  # Get the model name from the command arguments
     logging.info(f"Downloading {model_name}")
     if model_name:
-        response = await manage_model("pull", model_name)
+        response = await ollama_client.manage_model("pull", model_name)
         if response.status == 200:
             await message.answer(f"Model '{model_name}' is being pulled.")
         else:
@@ -258,7 +262,7 @@ async def settings_callback_handler(query: types.CallbackQuery):
 
 @dp.callback_query(lambda query: query.data == "switchllm")
 async def switchllm_callback_handler(query: types.CallbackQuery):
-    models = await model_list()
+    models = await ollama_client.model_list()
     switchllm_builder = InlineKeyboardBuilder()
     for model in models:
         modelname = model["name"]
@@ -422,7 +426,7 @@ async def delete_prompt_confirm_handler(query: types.CallbackQuery):
 
 @dp.callback_query(lambda query: query.data == "delete_model")
 async def delete_model_callback_handler(query: types.CallbackQuery):
-    models = await model_list()
+    models = await ollama_client.model_list()
     delete_model_kb = InlineKeyboardBuilder()
     for model in models:
         modelname = model["name"]
@@ -438,7 +442,7 @@ async def delete_model_callback_handler(query: types.CallbackQuery):
 @dp.callback_query(lambda query: query.data.startswith("delete_model_"))
 async def delete_model_confirm_handler(query: types.CallbackQuery):
     modelname = query.data.split("delete_model_")[1]
-    response = await manage_model("delete", modelname)
+    response = await ollama_client.manage_model("delete", modelname)
     if response.status == 200:
         await query.answer(f"Deleted model: {modelname}")
     else:
@@ -657,7 +661,7 @@ async def ollama_request(message: types.Message, prompt: str = None):
         temperature = payload.get("temperature")
         
         # Generate response
-        async for response_data in generate(payload, modelname, prompt, temperature=temperature):
+        async for response_data in ollama_client.generate(payload, modelname, prompt, temperature=temperature):
             msg = response_data.get("message")
             if msg is None:
                 continue

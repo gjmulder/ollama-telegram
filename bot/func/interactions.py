@@ -26,35 +26,95 @@ else:
     log_level = logging.getLevelName(log_level_str)
 logging.basicConfig(level=log_level)
 
-async def manage_model(action: str, model_name: str):
-    async with aiohttp.ClientSession() as session:
-        url = f"http://{ollama_base_url}:{ollama_port}/api/{action}"
-        
-        if action == "pull":
-            # Use the exact payload structure from the curl example
-            data = json.dumps({"name": model_name})
-            headers = {
-                'Content-Type': 'application/json'
-            }
-            logging.info(f"Pulling model: {model_name}")
-            logging.info(f"Request URL: {url}")
-            logging.info(f"Request Payload: {data}")
+class OllamaAPIClient:
+    def __init__(self, base_url, port):
+        self.base_url = base_url
+        self.port = port
+
+    async def manage_model(self, action: str, model_name: str):
+        async with aiohttp.ClientSession() as session:
+            url = f"http://{self.base_url}:{self.port}/api/{action}"
             
-            async with session.post(url, data=data, headers=headers) as response:
-                logging.info(f"Pull model response status: {response.status}")
-                response_text = await response.text()
-                logging.info(f"Pull model response text: {response_text}")
-                return response
-        elif action == "delete":
-            data = json.dumps({"name": model_name})
-            headers = {
-                'Content-Type': 'application/json'
+            if action == "pull":
+                # Use the exact payload structure from the curl example
+                data = json.dumps({"name": model_name})
+                headers = {
+                    'Content-Type': 'application/json'
+                }
+                logging.info(f"Pulling model: {model_name}")
+                logging.info(f"Request URL: {url}")
+                logging.info(f"Request Payload: {data}")
+                
+                async with session.post(url, data=data, headers=headers) as response:
+                    logging.info(f"Pull model response status: {response.status}")
+                    response_text = await response.text()
+                    logging.info(f"Pull model response text: {response_text}")
+                    return response
+            elif action == "delete":
+                data = json.dumps({"name": model_name})
+                headers = {
+                    'Content-Type': 'application/json'
+                }
+                async with session.delete(url, data=data, headers=headers) as response:
+                    return response
+            else:
+                logging.error(f"Unsupported model management action: {action}")
+                return None
+
+    async def model_list(self):
+        async with aiohttp.ClientSession() as session:
+            url = f"http://{self.base_url}:{self.port}/api/tags"
+            async with session.get(url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data["models"]
+                else:
+                    return []
+                
+    async def generate(self, payload: dict, modelname: str, prompt: str, temperature: float = 0.7):
+        client_timeout = ClientTimeout(total=int(timeout))
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            url = f"http://{self.base_url}:{self.port}/api/chat"
+
+            # Prepare the payload according to Ollama API specification
+            ollama_payload = {
+                "model": modelname,
+                "messages": payload.get("messages", []),
+                "stream": payload.get("stream", True),
+                "options": {"temperature": temperature}  # Add temperature to options
             }
-            async with session.delete(url, data=data, headers=headers) as response:
-                return response
-        else:
-            logging.error(f"Unsupported model management action: {action}")
-            return None
+
+            try:
+                logging.info(f"Sending request to Ollama API: {url}")
+                logging.info(f"Payload: {json.dumps(ollama_payload, indent=2)}")
+
+                async with session.post(url, json=ollama_payload) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logging.error(f"API Error: {response.status} - {error_text}")
+                        raise aiohttp.ClientResponseError(
+                            request_info=response.request_info,
+                            history=response.history,
+                            status=response.status,
+                            message=f"API Error: {error_text}"
+                        )
+
+                    buffer = b""
+                    async for chunk in response.content.iter_any():
+                        buffer += chunk
+                        while b"\n" in buffer:
+                            line, buffer = buffer.split(b"\n", 1)
+                            line = line.strip()
+                            if line:
+                                try:
+                                    yield json.loads(line)
+                                except json.JSONDecodeError as e:
+                                    logging.error(f"JSON Decode Error: {e}")
+                                    logging.error(f"Problematic line: {line}")
+
+            except aiohttp.ClientError as e:
+                logging.error(f"Client Error during request: {e}")
+                raise
 
 def add_system_prompt(user_id, prompt, is_global):
     conn = sqlite3.connect('users.db')
@@ -94,61 +154,6 @@ def delete_system_prompt(prompt_id):
     c.execute("DELETE FROM system_prompts WHERE id = ?", (prompt_id,))
     conn.commit()
     conn.close()
-
-async def model_list():
-    async with aiohttp.ClientSession() as session:
-        url = f"http://{ollama_base_url}:{ollama_port}/api/tags"
-        async with session.get(url) as response:
-            if response.status == 200:
-                data = await response.json()
-                return data["models"]
-            else:
-                return []
-                
-async def generate(payload: dict, modelname: str, prompt: str, temperature: float = 0.7):
-    client_timeout = ClientTimeout(total=int(timeout))
-    async with aiohttp.ClientSession(timeout=client_timeout) as session:
-        url = f"http://{ollama_base_url}:{ollama_port}/api/chat"
-
-        # Prepare the payload according to Ollama API specification
-        ollama_payload = {
-            "model": modelname,
-            "messages": payload.get("messages", []),
-            "stream": payload.get("stream", True),
-            "options": {"temperature": temperature}  # Add temperature to options
-        }
-
-        try:
-            logging.info(f"Sending request to Ollama API: {url}")
-            logging.info(f"Payload: {json.dumps(ollama_payload, indent=2)}")
-
-            async with session.post(url, json=ollama_payload) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logging.error(f"API Error: {response.status} - {error_text}")
-                    raise aiohttp.ClientResponseError(
-                        request_info=response.request_info,
-                        history=response.history,
-                        status=response.status,
-                        message=f"API Error: {error_text}"
-                    )
-
-                buffer = b""
-                async for chunk in response.content.iter_any():
-                    buffer += chunk
-                    while b"\n" in buffer:
-                        line, buffer = buffer.split(b"\n", 1)
-                        line = line.strip()
-                        if line:
-                            try:
-                                yield json.loads(line)
-                            except json.JSONDecodeError as e:
-                                logging.error(f"JSON Decode Error: {e}")
-                                logging.error(f"Problematic line: {line}")
-
-        except aiohttp.ClientError as e:
-            logging.error(f"Client Error during request: {e}")
-            raise
 
 def load_allowed_ids_from_db():
     conn = sqlite3.connect('users.db')
