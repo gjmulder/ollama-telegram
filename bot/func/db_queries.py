@@ -141,4 +141,14 @@ INSERT INTO active_chat_contexts (
 delete_active_chat_context_by_key_query = '''
 DELETE FROM active_chat_contexts
 WHERE chat_key = ?
-''' 
+'''
+
+select_user_exists_query = "SELECT 1 FROM users WHERE id = ?"
+insert_system_prompts_query2 = "INSERT INTO system_prompts (user_id, prompt, is_global) VALUES (?, ?, ?)"
+select_system_prompts_query = "SELECT id, user_id, prompt, is_global, timestamp FROM system_prompts WHERE 1=1"
+select_system_prompts_user_filter = " AND (user_id = ? OR user_id IS NULL)"
+select_system_prompts_global_filter = " AND is_global = ?"
+delete_system_prompt_query = "DELETE FROM system_prompts WHERE id = ?"
+select_user_ids_query = "SELECT id FROM users"
+select_all_users_query = "SELECT id, name FROM users"
+delete_user_query = "DELETE FROM users WHERE id = ?" 

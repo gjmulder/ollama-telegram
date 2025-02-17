@@ -137,7 +137,7 @@ ollama_client = OllamaAPIClient(ollama_base_url, ollama_port)
 db_manager = DatabaseManager() # Instantiate DatabaseManager
 
 def init_db():
-    db_manager.init_db() # Use DatabaseManager method
+    db_manager.initialize_database() # Use DatabaseManager method
 
 def register_user(user_id, user_name):
     db_manager.register_user(user_id, user_name) # Use DatabaseManager method
@@ -285,7 +285,7 @@ async def about_callback_handler(query: types.CallbackQuery):
     # Fetch the selected prompt name
     selected_prompt_name = "None"
     if selected_prompt_id is not None:
-        prompts = get_system_prompts(user_id=query.from_user.id, is_global=None)
+        prompts = db_manager.get_system_prompts(user_id=query.from_user.id, is_global=None)
         for prompt in prompts:
             if prompt[0] == selected_prompt_id:
                 selected_prompt_name = prompt[2]  # prompt[2] is the prompt text
@@ -319,7 +319,7 @@ This project is under <a href='https://github.com/ruecat/ollama-telegram/blob/ma
 @dp.callback_query(lambda query: query.data == "list_users")
 @perms_admins
 async def list_users_callback_handler(query: types.CallbackQuery):
-    users = db_manager.get_all_users_from_db() # Use DatabaseManager method
+    users = db_manager.get_all_users() # Use DatabaseManager method
     user_kb = InlineKeyboardBuilder()
     for user_id, user_name in users:
         user_kb.row(types.InlineKeyboardButton(text=f"{user_name} ({user_id})", callback_data=f"remove_{user_id}"))
@@ -330,7 +330,7 @@ async def list_users_callback_handler(query: types.CallbackQuery):
 @perms_admins
 async def remove_user_from_list_handler(query: types.CallbackQuery):
     user_id = int(query.data.split("_")[1])
-    if db_manager.remove_user_from_db(user_id): # Use DatabaseManager method
+    if db_manager.remove_user(user_id): # Use DatabaseManager method
         await query.answer(f"User {user_id} has been removed.")
         await query.message.edit_text(f"User {user_id} has been removed.")
     else:
@@ -369,7 +369,7 @@ async def prompt_callback_handler(query: types.CallbackQuery):
     save_global_settings_to_db()
 
     # Fetch the selected prompt text from the database
-    prompts = get_system_prompts(user_id=query.from_user.id)
+    prompts = db_manager.get_system_prompts(user_id=query.from_user.id)
     selected_prompt_name = "Unknown Prompt"  # Default value if prompt not found
     for prompt in prompts:
         if prompt[0] == prompt_id:
@@ -555,7 +555,7 @@ async def add_prompt_to_active_chats(message, prompt, image_base64, modelname, s
     save_active_chat_context_to_db(chat_key, chat_data)
 
 def save_active_chat_context_to_db(chat_key, chat_context):
-    db_manager.save_active_chat_context_to_db(chat_key, chat_context) # Use DatabaseManager method
+    db_manager.save_active_chat_context(chat_key, chat_context) # Use DatabaseManager method
 
 async def send_response(message, text):
     for page_text in text:
@@ -608,7 +608,7 @@ async def ollama_request(message: types.Message, prompt: str = None):
         # Retrieve and prepare system prompt if selected
         system_prompt = None
         if selected_prompt_id is not None:
-            system_prompts = get_system_prompts(user_id=message.from_user.id, is_global=None)
+            system_prompts = db_manager.get_system_prompts(user_id=message.from_user.id, is_global=None)
             if system_prompts:
                 # Find the specific prompt by ID
                 for sp in system_prompts:
@@ -660,7 +660,7 @@ async def ollama_request(message: types.Message, prompt: str = None):
 def save_context_to_db(chat_key):
     """Save the active chat to DB"""
     print(f"\nSaving context for {chat_key} to database...")
-    db_manager.save_active_chat_context_to_db(chat_key, ACTIVE_CHATS.get(chat_key, {})) # Use DatabaseManager method
+    db_manager.save_active_chat_context(chat_key, ACTIVE_CHATS.get(chat_key, {})) # Use DatabaseManager method
     print(f"Context for {chat_key} saved successfully!")
 
 def signal_handler(sig, frame):
@@ -673,7 +673,7 @@ def signal_handler(sig, frame):
 def load_global_settings_from_db():
     global modelname
     global selected_prompt_id
-    modelname, selected_prompt_id = db_manager.load_global_settings_from_db() # Use DatabaseManager method
+    modelname, selected_prompt_id = db_manager.load_global_settings() # Use DatabaseManager method
 
     # Load SYSTEM_PROMPT from env
     env_system_prompt = os.getenv("SYSTEM_PROMPT")
@@ -710,19 +710,19 @@ def save_global_settings_to_db():
     global modelname
     global selected_prompt_id
     global DEFAULT_TEMPERATURE
-    db_manager.save_global_settings_to_db(modelname, selected_prompt_id, DEFAULT_TEMPERATURE) # Use DatabaseManager method
+    db_manager.save_global_settings(modelname, selected_prompt_id, DEFAULT_TEMPERATURE) # Use DatabaseManager method
 
 async def load_active_chats_from_db():  # Make the function async
     global ACTIVE_CHATS
-    loaded_chats = await db_manager.load_active_chats_from_db() # Use DatabaseManager method and await
+    loaded_chats = await db_manager.load_active_chats() # Use DatabaseManager method and await
     await ACTIVE_CHATS.set_all(loaded_chats)  # Await the set_all call
 
 async def save_active_chats_to_db():
     all_chats = await ACTIVE_CHATS.get_all() # get all chats
-    await db_manager.save_active_chats_to_db(all_chats) # Use DatabaseManager method and await
+    await db_manager.save_active_chats(all_chats) # Use DatabaseManager method and await
 
 def delete_active_chat_context_from_db(chat_key):
-    db_manager.delete_active_chat_context_from_db(chat_key) # Use DatabaseManager method
+    db_manager.delete_active_chat_context(chat_key) # Use DatabaseManager method
 
 async def main():
     # Register signal handler for Ctrl+C
@@ -731,7 +731,7 @@ async def main():
     init_db()
     load_global_settings_from_db()
     await load_active_chats_from_db()  # Await the loading
-    allowed_ids = db_manager.load_allowed_ids_from_db() # Use DatabaseManager method
+    allowed_ids = db_manager.load_allowed_user_ids() # Use DatabaseManager method
     print(f"allowed_ids: {allowed_ids}")
     await bot.set_my_commands(commands)
     try:

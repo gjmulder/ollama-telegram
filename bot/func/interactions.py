@@ -3,13 +3,14 @@ import logging
 import os
 import aiohttp
 import json
-import sqlite3
 from aiogram import types
 from aiohttp import ClientTimeout
 from asyncio import Lock
 from functools import wraps
 from dotenv import load_dotenv
 import re  # Add this import at the top if not already present
+from func.db_manager import DatabaseManager # Import DatabaseManager
+
 load_dotenv()
 token = os.getenv("TOKEN")
 allowed_ids = list(map(int, os.getenv("USER_IDS", "").split(",")))
@@ -116,113 +117,51 @@ class OllamaAPIClient:
                 logging.error(f"Client Error during request: {e}")
                 raise
 
-def add_system_prompt(user_id, prompt, is_global):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute("INSERT INTO system_prompts (user_id, prompt, is_global) VALUES (?, ?, ?)",
-              (user_id, prompt, is_global))
-    conn.commit()
-    conn.close()
-
-def get_system_prompts(user_id=None, is_global=None):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    query = "SELECT id, user_id, prompt, is_global, timestamp FROM system_prompts WHERE 1=1"
-    params = []
-
-    if user_id is not None:
-        query += " AND (user_id = ? OR user_id IS NULL)"
-        params.append(user_id)
-    elif is_global is not None:
-        query += " AND is_global = ?"
-        params.append(is_global)
-    else:
-        query = "SELECT id, user_id, prompt, is_global, timestamp FROM system_prompts"
-
-    logging.info(f"Executing SQL query: {query} with parameters: {params}")
-    c.execute(query, params)
-    prompts = c.fetchall()
-    conn.close()
-
-    logging.info(f"Retrieved {len(prompts)} system prompts.")
-    logging.debug(f"Retrieved prompts data: {prompts}")
-    return prompts
-
-def delete_system_prompt(prompt_id):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM system_prompts WHERE id = ?", (prompt_id,))
-    conn.commit()
-    conn.close()
-
-def load_allowed_ids_from_db():
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute("SELECT id FROM users")
-    user_ids = [row[0] for row in c.fetchall()]
-    print(f"users_ids: {user_ids}")
-    conn.close()
-    return user_ids
-
-
-def get_all_users_from_db():
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute("SELECT id, name FROM users")
-    users = c.fetchall()
-    conn.close()
-    return users
-
-def remove_user_from_db(user_id):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM users WHERE id = ?", (user_id,))
-    removed = c.rowcount > 0
-    conn.commit()
-    conn.close()
-    if removed:
-        allowed_ids = [id for id in allowed_ids if id != user_id]
-    return removed
-
 def perms_allowed(func):
     @wraps(func)
     async def wrapper(message: types.Message = None, query: types.CallbackQuery = None):
         user_id = message.from_user.id if message else query.from_user.id
         user_full_name = f"{message.from_user.first_name} {message.from_user.last_name}({message.from_user.id})" if message else f"{query.from_user.first_name} {query.from_user.last_name}({query.from_user.id})"
-        if user_id in admin_ids:
-            logging.info(f"[PERMS_ALLOWED] {user_full_name} is allowed because they are an admin.")
-            if message:
-                return await func(message)
-            elif query:
-                return await func(query=query)
-        elif user_id in allowed_ids:
-            logging.info(f"[PERMS_ALLOWED] {user_full_name} is allowed because they are in allowed_ids.")
-            if message:
-                return await func(message)
-            elif query:
-                return await func(query=query)
-        else:
-            if message:
-                if message and message.chat.type in ["supergroup", "group"]:
-                    if allow_all_users_in_groups:
-                        logging.info(f"[PERMS_ALLOWED] {user_full_name} is allowed in group '{message.chat.title}'({message.chat.id}) because ALLOW_ALL_USERS_IN_GROUPS is True.")
-                        return await func(message)
+        db_manager = DatabaseManager() # Instantiate DatabaseManager
+        try:
+            allowed_ids = db_manager.load_allowed_user_ids() # Use DatabaseManager method
+            admin_ids = list(map(int, os.getenv("ADMIN_IDS", "").split(","))) # admin_ids still loaded from env
+            if user_id in admin_ids:
+                logging.info(f"[PERMS_ALLOWED] {user_full_name} is allowed because they are an admin.")
+                if message:
+                    return await func(message)
+                elif query:
+                    return await func(query=query)
+            elif user_id in allowed_ids:
+                logging.info(f"[PERMS_ALLOWED] {user_full_name} is allowed because they are in allowed_ids.")
+                if message:
+                    return await func(message)
+                elif query:
+                    return await func(query=query)
+            else:
+                if message:
+                    if message and message.chat.type in ["supergroup", "group"]:
+                        if allow_all_users_in_groups:
+                            logging.info(f"[PERMS_ALLOWED] {user_full_name} is allowed in group '{message.chat.title}'({message.chat.id}) because ALLOW_ALL_USERS_IN_GROUPS is True.")
+                            return await func(message)
+                        else:
+                            logging.info(f"[PERMS_ALLOWED] {user_full_name} is denied in group '{message.chat.title}'({message.chat.id}). ALLOW_ALL_USERS_IN_GROUPS is False and user is not in allowed_ids/admin_ids.")
+                            await message.answer("Access Denied")
+                            return
                     else:
-                        logging.info(f"[PERMS_ALLOWED] {user_full_name} is denied in group '{message.chat.title}'({message.chat.id}). ALLOW_ALL_USERS_IN_GROUPS is False and user is not in allowed_ids/admin_ids.")
+                        logging.info(f"[PERMS_ALLOWED] {user_full_name} is denied in private chat. User is not in allowed_ids/admin_ids.")
                         await message.answer("Access Denied")
                         return
-                else:
-                    logging.info(f"[PERMS_ALLOWED] {user_full_name} is denied in private chat. User is not in allowed_ids/admin_ids.")
-                    await message.answer("Access Denied")
-                    return
-            elif query:
-                if message and message.chat.type in ["supergroup", "group"]:
-                    logging.info(f"[PERMS_ALLOWED-QUERY] {user_full_name} is denied in group '{message.chat.title}'({message.chat.id}). Queries are not allowed in groups.") # Queries are generally not expected in groups, so explicitly deny
-                    return # Do not answer, just ignore. Or maybe answer "Queries not allowed in groups" if needed.
-                else:
-                    logging.info(f"[PERMS_ALLOWED-QUERY] {user_full_name} is denied in private chat query. User is not in allowed_ids/admin_ids.")
-                    await query.answer("Access Denied")
-                    return
+                elif query:
+                    if message and message.chat.type in ["supergroup", "group"]:
+                        logging.info(f"[PERMS_ALLOWED-QUERY] {user_full_name} is denied in group '{message.chat.title}'({message.chat.id}). Queries are not allowed in groups.") # Queries are generally not expected in groups, so explicitly deny
+                        return # Do not answer, just ignore. Or maybe answer "Queries not allowed in groups" if needed.
+                    else:
+                        logging.info(f"[PERMS_ALLOWED-QUERY] {user_full_name} is denied in private chat query. User is not in allowed_ids/admin_ids.")
+                        await query.answer("Access Denied")
+                        return
+        finally:
+            db_manager.close_connection() # Close connection in finally block
 
     return wrapper
 
@@ -232,35 +171,41 @@ def perms_admins(func):
     async def wrapper(message: types.Message = None, query: types.CallbackQuery = None):
         user_id = message.from_user.id if message else query.from_user.id
         user_full_name = f"{message.from_user.first_name} {message.from_user.last_name}({message.from_user.id})" if message else f"{query.from_user.first_name} {query.from_user.last_name}({query.from_user.id})"
-        if user_id in admin_ids:
-            logging.info(f"[PERMS_ADMINS] {user_full_name} is allowed because they are an admin.")
-            if message:
-                return await func(message)
-            elif query:
-                return await func(query=query)
-        else:
-            if message:
-                if message and message.chat.type in ["supergroup", "group"]:
-                    logging.info(f"[PERMS_ADMINS] {user_full_name} is denied in group '{message.chat.title}'({message.chat.id}). Admin permissions are not applicable in groups.") # Admin commands usually not relevant in groups
-                    return # Or maybe send "Admin commands not in groups"
-                else:
-                    logging.info(f"[PERMS_ADMINS] {user_full_name} is denied in private chat. User is not in admin_ids.")
-                    await message.answer("Access Denied")
-                    logging.info(
-                        f"[MSG] {message.from_user.first_name} {message.from_user.last_name}({message.from_user.id}) is not allowed to use this bot."
-                    )
-            elif query:
-                if message and message.chat.type in ["supergroup", "group"]:
-                    logging.info(f"[PERMS_ADMINS-QUERY] {user_full_name} is denied in group '{message.chat.title}'({message.chat.id}). Admin queries are not applicable in groups.") # Admin commands usually not relevant in groups
-                    return # Or maybe send "Admin commands not in groups"
-                else:
-                    logging.info(f"[PERMS_ADMINS-QUERY] {user_full_name} is denied in private chat query. User is not in admin_ids.")
-                    await query.answer("Access Denied")
-                    logging.info(
-                        f"[QUERY] {message.from_user.first_name} {message.from_user.last_name}({message.from_user.id}) is not allowed to use this bot."
-                    )
+        db_manager = DatabaseManager() # Instantiate DatabaseManager
+        try:
+            admin_ids = list(map(int, os.getenv("ADMIN_IDS", "").split(","))) # admin_ids still loaded from env
+            if user_id in admin_ids:
+                logging.info(f"[PERMS_ADMINS] {user_full_name} is allowed because they are an admin.")
+                if message:
+                    return await func(message)
+                elif query:
+                    return await func(query=query)
+            else:
+                if message:
+                    if message and message.chat.type in ["supergroup", "group"]:
+                        logging.info(f"[PERMS_ADMINS] {user_full_name} is denied in group '{message.chat.title}'({message.chat.id}). Admin permissions are not applicable in groups.") # Admin commands usually not relevant in groups
+                        return # Or maybe send "Admin commands not in groups"
+                    else:
+                        logging.info(f"[PERMS_ADMINS] {user_full_name} is denied in private chat. User is not in admin_ids.")
+                        await message.answer("Access Denied")
+                        logging.info(
+                            f"[MSG] {message.from_user.first_name} {message.from_user.last_name}({message.from_user.id}) is not allowed to use this bot."
+                        )
+                elif query:
+                    if message and message.chat.type in ["supergroup", "group"]:
+                        logging.info(f"[PERMS_ADMINS-QUERY] {user_full_name} is denied in group '{message.chat.title}'({message.chat.id}). Admin queries are not applicable in groups.") # Admin commands usually not relevant in groups
+                        return # Or maybe send "Admin commands not in groups"
+                    else:
+                        logging.info(f"[PERMS_ADMINS-QUERY] {user_full_name} is denied in private chat query. User is not in admin_ids.")
+                        await query.answer("Access Denied")
+                        logging.info(
+                            f"[QUERY] {message.from_user.first_name} {message.from_user.last_name}({message.from_user.id}) is not allowed to use this bot."
+                        )
+        finally:
+            db_manager.close_connection() # Close connection in finally block
 
     return wrapper
+
 class contextLock:
     lock = Lock()
 
