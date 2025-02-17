@@ -8,9 +8,6 @@ import asyncio
 import traceback
 import io
 import base64
-import sqlite3
-import re
-from func.interactions import convert_markdown_for_telegram
 import sys
 import logging
 import json
@@ -394,7 +391,9 @@ async def prompt_callback_handler(query: types.CallbackQuery):
             selected_prompt_name = prompt[2]  # prompt[2] is the prompt text
             break
 
-    await query.answer(f"System Prompt '{selected_prompt_name}' selected!", show_alert=True)
+    # Truncate the prompt name for the answer.  Keep it short!
+    truncated_prompt_name = (selected_prompt_name[:50] + '...') if len(selected_prompt_name) > 50 else selected_prompt_name
+    await query.answer(f"Prompt '{truncated_prompt_name}' selected!", show_alert=True)
 
     all_chats = await ACTIVE_CHATS.get_all()
     for chat_key in all_chats:
