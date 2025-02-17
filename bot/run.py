@@ -17,6 +17,7 @@ from pathlib import Path
 import random
 from func.db_queries import *
 from func.interactions import OllamaAPIClient
+from func.db_manager import DatabaseManager # Import DatabaseManager
 
 # Disable watchdog debug logging
 logging.getLogger('watchdog').setLevel(logging.WARNING)
@@ -132,37 +133,17 @@ else:
 # Initialize Ollama API Client
 ollama_client = OllamaAPIClient(ollama_base_url, ollama_port)
 
-def init_db():
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute(init_db_query)
-    c.execute(create_users_table_query)
-    c.execute(create_chats_table_query)
-    c.execute(create_system_prompts_table_query)
-    c.execute(create_global_settings_table_query)
-    c.execute(create_active_chat_contexts_table_query)
+# Initialize Database Manager
+db_manager = DatabaseManager() # Instantiate DatabaseManager
 
-    # Initialize global settings if not exist
-    c.execute(select_count_global_settings_query)
-    if c.fetchone()[0] == 0:
-        c.execute(insert_global_settings_query, (modelname, selected_prompt_id))
-    conn.commit()
-    conn.close()
+def init_db():
+    db_manager.init_db() # Use DatabaseManager method
 
 def register_user(user_id, user_name):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute(insert_or_replace_users_query, (user_id, user_name))
-    conn.commit()
-    conn.close()
+    db_manager.register_user(user_id, user_name) # Use DatabaseManager method
 
 def save_chat_message(user_id, role, content):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute(insert_chats_query,
-              (user_id, role, content))
-    conn.commit()
-    conn.close()
+    db_manager.save_chat_message(user_id, role, content) # Use DatabaseManager method
 
 @dp.callback_query(lambda query: query.data == "register")
 async def register_callback_handler(query: types.CallbackQuery):
@@ -223,7 +204,7 @@ async def command_get_context_handler(message: Message) -> None:
 async def add_global_prompt_handler(message: Message):
     prompt_text = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else None  # Get the prompt text from the command arguments
     if prompt_text:
-        add_system_prompt(message.from_user.id, prompt_text, True)
+        db_manager.add_system_prompt(message.from_user.id, prompt_text, True) # Use DatabaseManager method
         await message.answer("Global prompt added successfully.")
     else:
         await message.answer("Please provide a prompt text to add.")
@@ -232,7 +213,7 @@ async def add_global_prompt_handler(message: Message):
 async def add_private_prompt_handler(message: Message):
     prompt_text = message.text.split(maxsplit=1)[1] if len(message.text.split()) > 1 else None  # Get the prompt text from the command arguments
     if prompt_text:
-        add_system_prompt(message.from_user.id, prompt_text, False)
+        db_manager.add_system_prompt(message.from_user.id, prompt_text, False) # Use DatabaseManager method
         await message.answer("Private prompt added successfully.")
     else:
         await message.answer("Please provide a prompt text to add.")
@@ -338,7 +319,7 @@ This project is under <a href='https://github.com/ruecat/ollama-telegram/blob/ma
 @dp.callback_query(lambda query: query.data == "list_users")
 @perms_admins
 async def list_users_callback_handler(query: types.CallbackQuery):
-    users = get_all_users_from_db()
+    users = db_manager.get_all_users_from_db() # Use DatabaseManager method
     user_kb = InlineKeyboardBuilder()
     for user_id, user_name in users:
         user_kb.row(types.InlineKeyboardButton(text=f"{user_name} ({user_id})", callback_data=f"remove_{user_id}"))
@@ -349,7 +330,7 @@ async def list_users_callback_handler(query: types.CallbackQuery):
 @perms_admins
 async def remove_user_from_list_handler(query: types.CallbackQuery):
     user_id = int(query.data.split("_")[1])
-    if remove_user_from_db(user_id):
+    if db_manager.remove_user_from_db(user_id): # Use DatabaseManager method
         await query.answer(f"User {user_id} has been removed.")
         await query.message.edit_text(f"User {user_id} has been removed.")
     else:
@@ -362,7 +343,7 @@ async def cancel_remove_handler(query: types.CallbackQuery):
 
 @dp.callback_query(lambda query: query.data == "select_prompt")
 async def select_prompt_callback_handler(query: types.CallbackQuery):
-    prompts = get_system_prompts(user_id=query.from_user.id)
+    prompts = db_manager.get_system_prompts(user_id=query.from_user.id) # Use DatabaseManager method
     prompt_kb = InlineKeyboardBuilder()
     for prompt in prompts:
         prompt_id, _, prompt_text, _, _ = prompt
@@ -405,7 +386,7 @@ async def prompt_callback_handler(query: types.CallbackQuery):
 
 @dp.callback_query(lambda query: query.data == "delete_prompt")
 async def delete_prompt_callback_handler(query: types.CallbackQuery):
-    prompts = get_system_prompts(user_id=query.from_user.id)
+    prompts = db_manager.get_system_prompts(user_id=query.from_user.id) # Use DatabaseManager method
     delete_prompt_kb = InlineKeyboardBuilder()
     for prompt in prompts:
         prompt_id, _, prompt_text, _, _ = prompt
@@ -421,7 +402,7 @@ async def delete_prompt_callback_handler(query: types.CallbackQuery):
 @dp.callback_query(lambda query: query.data.startswith("delete_prompt_"))
 async def delete_prompt_confirm_handler(query: types.CallbackQuery):
     prompt_id = int(query.data.split("delete_prompt_")[1])
-    delete_system_prompt(prompt_id)
+    db_manager.delete_system_prompt(prompt_id) # Use DatabaseManager method
     await query.answer(f"Deleted prompt ID: {prompt_id}")
 
 @dp.callback_query(lambda query: query.data == "delete_model")
@@ -574,14 +555,7 @@ async def add_prompt_to_active_chats(message, prompt, image_base64, modelname, s
     save_active_chat_context_to_db(chat_key, chat_data)
 
 def save_active_chat_context_to_db(chat_key, chat_context):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    messages_json = json.dumps(chat_context["messages"]) if chat_context.get("messages") else None
-    c.execute(replace_active_chat_contexts_query,
-              (chat_key, chat_context["model"], chat_context.get("selected_prompt_id"), messages_json, chat_context["stream"]))
-    conn.commit()
-    conn.close()
-    print(f"Active chat context for key '{chat_key}' saved to database.")
+    db_manager.save_active_chat_context_to_db(chat_key, chat_context) # Use DatabaseManager method
 
 async def send_response(message, text):
     for page_text in text:
@@ -686,7 +660,7 @@ async def ollama_request(message: types.Message, prompt: str = None):
 def save_context_to_db(chat_key):
     """Save the active chat to DB"""
     print(f"\nSaving context for {chat_key} to database...")
-    save_active_chat_context_to_db(chat_key, ACTIVE_CHATS.get(chat_key, {}))
+    db_manager.save_active_chat_context_to_db(chat_key, ACTIVE_CHATS.get(chat_key, {})) # Use DatabaseManager method
     print(f"Context for {chat_key} saved successfully!")
 
 def signal_handler(sig, frame):
@@ -699,15 +673,7 @@ def signal_handler(sig, frame):
 def load_global_settings_from_db():
     global modelname
     global selected_prompt_id
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute(select_global_settings_limit_1_query)
-    settings = c.fetchone()
-    if settings:
-        modelname, db_selected_prompt_id = settings
-        selected_prompt_id = int(db_selected_prompt_id) if db_selected_prompt_id is not None else None
-    else:
-        print("No settings found in global_settings table.")
+    modelname, selected_prompt_id = db_manager.load_global_settings_from_db() # Use DatabaseManager method
 
     # Load SYSTEM_PROMPT from env
     env_system_prompt = os.getenv("SYSTEM_PROMPT")
@@ -716,8 +682,8 @@ def load_global_settings_from_db():
     if env_system_prompt and selected_prompt_id is None:
         print("Condition 'env_system_prompt and selected_prompt_id is None' is TRUE - Checking for existing prompt...")
         # Check if a system prompt with this text already exists
-        c.execute(select_id_from_system_prompts_query, (env_system_prompt,))
-        existing_prompt = c.fetchone()
+        prompts = db_manager.get_system_prompts() # Get prompts again to find the new one
+        existing_prompt = next((p for p in prompts if p[2] == env_system_prompt), None) # Find prompt by text
 
         if existing_prompt:
             selected_prompt_id = existing_prompt[0]
@@ -725,67 +691,38 @@ def load_global_settings_from_db():
         else:
             print("No existing system prompt found, creating a new one...")
             # Create a new system prompt
-            c.execute(insert_system_prompts_query, (env_system_prompt, None, True))
-            selected_prompt_id = c.lastrowid
-            print(f"Created new system prompt from .env with ID: {selected_prompt_id}")
-            conn.commit() # Commit here to save the newly inserted prompt
+            db_manager.add_system_prompt(None, env_system_prompt, True) # Use DatabaseManager method, user_id=None for global
+            # Retrieve the last inserted row ID which should be the new prompt's ID
+            prompts_after_insert = db_manager.get_system_prompts() # Get prompts again to find the new one
+            new_prompt = next((p for p in prompts_after_insert if p[2] == env_system_prompt), None) # Find the new prompt
+            if new_prompt:
+                selected_prompt_id = new_prompt[0]
+                print(f"Created new system prompt from .env with ID: {selected_prompt_id}")
+            else:
+                print("Failed to retrieve new system prompt ID after insertion.")
+
     else:
         print("Condition 'env_system_prompt and selected_prompt_id is None' is FALSE - Skipping default prompt loading.")
 
-    conn.close()
     print(f"Global settings loaded from database: modelname={modelname}, selected_prompt_id={selected_prompt_id}")
 
 def save_global_settings_to_db():
     global modelname
     global selected_prompt_id
     global DEFAULT_TEMPERATURE
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute(update_global_settings_query, (modelname, selected_prompt_id, DEFAULT_TEMPERATURE))
-    conn.commit()
-    conn.close()
-    print(f"Global settings saved to database: modelname={modelname}, selected_prompt_id={selected_prompt_id}, temperature={DEFAULT_TEMPERATURE}")
+    db_manager.save_global_settings_to_db(modelname, selected_prompt_id, DEFAULT_TEMPERATURE) # Use DatabaseManager method
 
 async def load_active_chats_from_db():  # Make the function async
     global ACTIVE_CHATS
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute(select_active_chat_contexts_query)
-    rows = c.fetchall()
-    loaded_chats = {}  # Temporary dictionary to store loaded chats
-    for row in rows:
-        chat_key, db_modelname, db_selected_prompt_id, messages_json, stream = row
-        messages = json.loads(messages_json) if messages_json else []
-        loaded_chats[chat_key] = {  # Store in the temporary dictionary
-            "model": db_modelname,
-            "messages": messages,
-            "stream": bool(stream),
-            "selected_prompt_id": int(db_selected_prompt_id) if db_selected_prompt_id is not None else None
-        }
-    conn.close()
-    print(f"Active chats loaded from database. Count: {len(loaded_chats)}")
+    loaded_chats = await db_manager.load_active_chats_from_db() # Use DatabaseManager method and await
     await ACTIVE_CHATS.set_all(loaded_chats)  # Await the set_all call
 
 async def save_active_chats_to_db():
     all_chats = await ACTIVE_CHATS.get_all() # get all chats
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute(delete_active_chat_contexts_query)
-    for chat_key, chat_data in all_chats.items():
-        messages_json = json.dumps(chat_data["messages"]) if chat_data.get("messages") else None
-        c.execute(insert_active_chat_contexts_query,
-                  (chat_key, chat_data["model"], chat_data.get("selected_prompt_id"), messages_json, chat_data["stream"]))
-    conn.commit()
-    conn.close()
-    print(f"Active chats saved to database. Count: {len(all_chats)}")
+    await db_manager.save_active_chats_to_db(all_chats) # Use DatabaseManager method and await
 
 def delete_active_chat_context_from_db(chat_key):
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    c.execute(delete_active_chat_context_by_key_query, (chat_key,))
-    conn.commit()
-    conn.close()
-    print(f"Active chat context for key '{chat_key}' deleted from database.")
+    db_manager.delete_active_chat_context_from_db(chat_key) # Use DatabaseManager method
 
 async def main():
     # Register signal handler for Ctrl+C
@@ -794,7 +731,7 @@ async def main():
     init_db()
     load_global_settings_from_db()
     await load_active_chats_from_db()  # Await the loading
-    allowed_ids = load_allowed_ids_from_db()
+    allowed_ids = db_manager.load_allowed_ids_from_db() # Use DatabaseManager method
     print(f"allowed_ids: {allowed_ids}")
     await bot.set_my_commands(commands)
     try:
