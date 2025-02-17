@@ -55,8 +55,68 @@ commands = [
     types.BotCommand(command="temp", description="Set Temperature"),
 ]
 
-ACTIVE_CHATS = {}
-ACTIVE_CHATS_LOCK = contextLock()
+class ActiveChats:
+    def __init__(self):
+        self._active_chats = {}
+        self._lock = asyncio.Lock()
+
+    async def get(self, chat_key):
+        async with self._lock:
+            return self._active_chats.get(chat_key)
+
+    async def set(self, chat_key, value):
+        async with self._lock:
+            self._active_chats[chat_key] = value
+
+    async def pop(self, chat_key):
+        async with self._lock:
+            return self._active_chats.pop(chat_key, None)
+
+    async def contains(self, chat_key):
+        async with self._lock:
+            return chat_key in self._active_chats
+        
+    async def get_all(self):
+        async with self._lock:
+            return self._active_chats.copy()
+        
+    async def set_all(self, new_chats):
+        async with self._lock:
+            self._active_chats = new_chats
+
+    async def update_message(self, chat_key, role, content):
+         async with self._lock:
+            if chat_key in self._active_chats:
+                self._active_chats[chat_key]["messages"].append({"role": role, "content": content})
+
+    async def update_model(self, chat_key, model_name):
+        async with self._lock:
+            if chat_key in self._active_chats:
+                self._active_chats[chat_key]["model"] = model_name
+
+    async def update_temperature(self, chat_key, temperature):
+        async with self._lock:
+            if chat_key in self._active_chats:
+                self._active_chats[chat_key]["temperature"] = temperature
+
+    async def update_selected_prompt_id(self, chat_key, selected_prompt_id):
+        async with self._lock:
+            if chat_key in self._active_chats:
+                self._active_chats[chat_key]["selected_prompt_id"] = selected_prompt_id
+
+    async def initialize_chat(self, chat_key, modelname, default_temperature, selected_prompt_id):
+        async with self._lock:
+            if chat_key not in self._active_chats:
+                self._active_chats[chat_key] = {
+                    "model": modelname,
+                    "messages": [],
+                    "stream": True,
+                    "temperature": default_temperature,
+                    "selected_prompt_id": selected_prompt_id
+                }
+
+ACTIVE_CHATS = ActiveChats()
+
 modelname = os.getenv("INITMODEL")
 mention = None
 selected_prompt_id = None  # Variable to store the selected prompt ID
@@ -130,9 +190,8 @@ async def command_start_handler(message: Message) -> None:
 @dp.message(Command("reset"))
 async def command_reset_handler(message: Message) -> None:
     if message.from_user.id in allowed_ids:
-        if message.from_user.id in ACTIVE_CHATS:
-            async with ACTIVE_CHATS_LOCK:
-                ACTIVE_CHATS.pop(message.from_user.id)
+        if await ACTIVE_CHATS.contains(message.from_user.id):
+            await ACTIVE_CHATS.pop(message.from_user.id)
             logging.info(f"Chat has been reset for {message.from_user.first_name}")
             await bot.send_message(
                 chat_id=message.chat.id,
@@ -143,8 +202,8 @@ async def command_reset_handler(message: Message) -> None:
 async def command_get_context_handler(message: Message) -> None:
     if message.from_user.id in allowed_ids:
         chat_key = get_chat_key(message)
-        if chat_key in ACTIVE_CHATS:
-            messages = ACTIVE_CHATS.get(chat_key)["messages"]
+        if await ACTIVE_CHATS.contains(chat_key):
+            messages = (await ACTIVE_CHATS.get(chat_key))["messages"]
             context = ""
             for msg in messages:
                 context += f"*{msg['role'].capitalize()}*: {msg['content']}\n"
@@ -255,9 +314,9 @@ async def about_callback_handler(query: types.CallbackQuery):
 
     # Fetch current temperature for the chat
     current_temperature = DEFAULT_TEMPERATURE  # Default value
-    async with ACTIVE_CHATS_LOCK:
-        if chat_key in ACTIVE_CHATS:
-            current_temperature = ACTIVE_CHATS[chat_key].get("temperature", DEFAULT_TEMPERATURE)
+    chat_data = await ACTIVE_CHATS.get(chat_key)
+    if chat_data:
+        current_temperature = chat_data.get("temperature", DEFAULT_TEMPERATURE)
 
     await bot.send_message(
         chat_id=query.message.chat.id,
@@ -316,9 +375,9 @@ async def select_prompt_callback_handler(query: types.CallbackQuery):
     )
     save_global_settings_to_db()
 
-    async with ACTIVE_CHATS_LOCK:
-        for chat_key in ACTIVE_CHATS:
-            ACTIVE_CHATS[chat_key]["selected_prompt_id"] = selected_prompt_id
+    all_chats = await ACTIVE_CHATS.get_all()
+    for chat_key in all_chats:
+        await ACTIVE_CHATS.update_selected_prompt_id(chat_key, selected_prompt_id)
 
 @dp.callback_query(lambda query: query.data.startswith("prompt_"))
 async def prompt_callback_handler(query: types.CallbackQuery):
@@ -337,9 +396,9 @@ async def prompt_callback_handler(query: types.CallbackQuery):
 
     await query.answer(f"System Prompt '{selected_prompt_name}' selected!", show_alert=True)
 
-    async with ACTIVE_CHATS_LOCK:
-        for chat_key in ACTIVE_CHATS:
-            ACTIVE_CHATS[chat_key]["selected_prompt_id"] = selected_prompt_id
+    all_chats = await ACTIVE_CHATS.get_all()
+    for chat_key in all_chats:
+        await ACTIVE_CHATS.update_selected_prompt_id(chat_key, selected_prompt_id)
 
 @dp.callback_query(lambda query: query.data == "delete_prompt")
 async def delete_prompt_callback_handler(query: types.CallbackQuery):
@@ -392,12 +451,7 @@ async def set_temperature_command(message: types.Message):
         temp = float(message.text.split(maxsplit=1)[1])
         if 0.0 <= temp <= 1.0:
             chat_key = get_chat_key(message)
-            async with ACTIVE_CHATS_LOCK:
-                if chat_key not in ACTIVE_CHATS:
-                    ACTIVE_CHATS[chat_key] = {"model": modelname, "temperature": temp, "stream": True, "selected_prompt_id": selected_prompt_id, "messages": []}
-                else:
-                    ACTIVE_CHATS[chat_key]["temperature"] = temp
-                logging.info(f"Temperature set for chat_key: {chat_key}, temperature: {ACTIVE_CHATS[chat_key]['temperature']}")
+            await ACTIVE_CHATS.update_temperature(chat_key, temp)
             await message.answer(f"Temperature set to {temp} for this chat.")
         else:
             await message.answer("Temperature must be between 0.0 and 1.0.")
@@ -478,52 +532,43 @@ def get_chat_key(message: types.Message) -> str:
 
 async def add_prompt_to_active_chats(message, prompt, image_base64, modelname, system_prompt=None):
     chat_key = get_chat_key(message)
-    async with ACTIVE_CHATS_LOCK:
-        # 1. Get existing chat context, or create a new one if it doesn't exist
-        if chat_key not in ACTIVE_CHATS:
-            ACTIVE_CHATS[chat_key] = {
-                "model": modelname,
-                "messages": [],  # Initialize messages as an empty list
-                "stream": True,
-                "temperature": DEFAULT_TEMPERATURE,  # Initialize temperature
-                # selected_prompt_id is managed globally, no need to initialize here
-            }
+    await ACTIVE_CHATS.initialize_chat(chat_key, modelname, DEFAULT_TEMPERATURE, selected_prompt_id)
 
-        # 2. Prepare the messages list:  Append to existing messages, don't overwrite
-        messages = ACTIVE_CHATS[chat_key]["messages"]
+    # 2. Prepare the messages list:  Append to existing messages, don't overwrite
+    messages = (await ACTIVE_CHATS.get(chat_key))["messages"]
 
-        # 3. Add system prompt if provided and not already present
-        if system_prompt:
-            # Check if a system prompt already exists.  Only add if it doesn't.
-            existing_system_messages = [
-                msg for msg in messages if msg.get("role") == "system"
-            ]
-            if not existing_system_messages:
-                messages.append({"role": "system", "content": system_prompt})
+    # 3. Add system prompt if provided and not already present
+    if system_prompt:
+        # Check if a system prompt already exists.  Only add if it doesn't.
+        existing_system_messages = [
+            msg for msg in messages if msg.get("role") == "system"
+        ]
+        if not existing_system_messages:
+            messages.append({"role": "system", "content": system_prompt})
 
-        # 4. Add the new user message
-        user_identifier = (
-            message.from_user.first_name if message.chat.type != "private" else ""
-        )
-        content_with_user = (
-            f"{user_identifier + ': ' if user_identifier else ''}{prompt}"
-        )
-        messages.append(
-            {
-                "role": "user",
-                "content": content_with_user,
-                "images": [image_base64] if image_base64 else [],
-            }
-        )
+    # 4. Add the new user message
+    user_identifier = (
+        message.from_user.first_name if message.chat.type != "private" else ""
+    )
+    content_with_user = (
+        f"{user_identifier + ': ' if user_identifier else ''}{prompt}"
+    )
+    messages.append(
+        {
+            "role": "user",
+            "content": content_with_user,
+            "images": [image_base64] if image_base64 else [],
+        }
+    )
 
-        # 5. Update the ACTIVE_CHATS dictionary *after* modifying the messages list
-        ACTIVE_CHATS[chat_key]["messages"] = messages
-        ACTIVE_CHATS[chat_key]["model"] = modelname  # Update model if needed
+    # 5. Update the ACTIVE_CHATS dictionary *after* modifying the messages list
+    await ACTIVE_CHATS.update_model(chat_key, modelname)
 
-        # 6.  *Don't* re-initialize temperature here.  It's already handled.
+    # 6.  *Don't* re-initialize temperature here.  It's already handled.
 
-        # 7. Save to DB *after* all changes
-        save_active_chat_context_to_db(chat_key, ACTIVE_CHATS[chat_key])
+    # 7. Save to DB *after* all changes
+    chat_data = await ACTIVE_CHATS.get(chat_key)
+    save_active_chat_context_to_db(chat_key, chat_data)
 
 def save_active_chat_context_to_db(chat_key, chat_context):
     conn = sqlite3.connect('users.db')
@@ -556,15 +601,13 @@ async def handle_response(message, response_data, full_response):
             formatted_response = [f"{page}\n\n⚙️ {modelname}\nGenerated in {response_data.get('total_duration') / 1e9:.2f}s." for page in formatted_response]
         text = formatted_response
         await send_response(message, text)
-        async with ACTIVE_CHATS_LOCK:
-            if ACTIVE_CHATS.get(chat_key) is not None:
-                ACTIVE_CHATS[chat_key]["messages"].append(
-                    {"role": "assistant", "content": full_response_stripped}
-                )
+        await ACTIVE_CHATS.update_message(chat_key, "assistant", full_response_stripped)
+
         logging.info(
             f"[Response]: '{full_response_stripped}' for {message.from_user.first_name} {message.from_user.last_name}"
         )
-        save_active_chat_context_to_db(chat_key, ACTIVE_CHATS[chat_key])
+        chat_data = await ACTIVE_CHATS.get(chat_key)
+        save_active_chat_context_to_db(chat_key, chat_data)
         if response_data.get('total_duration') and response_data.get('total_tokens'):
             duration_sec = response_data.get('total_duration') / 1e9
             tokens_per_sec = response_data.get('total_tokens') / duration_sec if duration_sec > 0 else 0
@@ -610,8 +653,7 @@ async def ollama_request(message: types.Message, prompt: str = None):
         )
         
         # Get the chat key and payload
-        async with ACTIVE_CHATS_LOCK:
-            payload = ACTIVE_CHATS.get(chat_key)
+        payload = await ACTIVE_CHATS.get(chat_key)
         payload["selected_prompt_id"] = selected_prompt_id
         temperature = payload.get("temperature")
         
@@ -648,7 +690,7 @@ def signal_handler(sig, frame):
     """Handle Ctrl+C by saving context before exit"""
     print("\nCtrl+C detected!")
     save_global_settings_to_db()
-    save_active_chats_to_db()
+    asyncio.run(asyncio.coroutine(save_active_chats_to_db)())
     sys.exit(0)
 
 def load_global_settings_from_db():
@@ -701,39 +743,38 @@ def save_global_settings_to_db():
     conn.close()
     print(f"Global settings saved to database: modelname={modelname}, selected_prompt_id={selected_prompt_id}, temperature={DEFAULT_TEMPERATURE}")
 
-def load_active_chats_from_db():
+async def load_active_chats_from_db():  # Make the function async
     global ACTIVE_CHATS
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     c.execute(select_active_chat_contexts_query)
     rows = c.fetchall()
+    loaded_chats = {}  # Temporary dictionary to store loaded chats
     for row in rows:
         chat_key, db_modelname, db_selected_prompt_id, messages_json, stream = row
         messages = json.loads(messages_json) if messages_json else []
-        ACTIVE_CHATS[chat_key] = {
+        loaded_chats[chat_key] = {  # Store in the temporary dictionary
             "model": db_modelname,
             "messages": messages,
             "stream": bool(stream),
+            "selected_prompt_id": int(db_selected_prompt_id) if db_selected_prompt_id is not None else None
         }
-        if db_selected_prompt_id is not None:
-            ACTIVE_CHATS[chat_key]["selected_prompt_id"] = int(db_selected_prompt_id)
-        else:
-            ACTIVE_CHATS[chat_key]["selected_prompt_id"] = None
     conn.close()
-    print(f"Active chats loaded from database. Count: {len(ACTIVE_CHATS)}")
+    print(f"Active chats loaded from database. Count: {len(loaded_chats)}")
+    await ACTIVE_CHATS.set_all(loaded_chats)  # Await the set_all call
 
-def save_active_chats_to_db():
-    global ACTIVE_CHATS
+async def save_active_chats_to_db():
+    all_chats = await ACTIVE_CHATS.get_all() # get all chats
     conn = sqlite3.connect('users.db')
     c = conn.cursor()
     c.execute(delete_active_chat_contexts_query)
-    for chat_key, chat_data in ACTIVE_CHATS.items():
+    for chat_key, chat_data in all_chats.items():
         messages_json = json.dumps(chat_data["messages"]) if chat_data.get("messages") else None
         c.execute(insert_active_chat_contexts_query,
                   (chat_key, chat_data["model"], chat_data.get("selected_prompt_id"), messages_json, chat_data["stream"]))
     conn.commit()
     conn.close()
-    print(f"Active chats saved to database. Count: {len(ACTIVE_CHATS)}")
+    print(f"Active chats saved to database. Count: {len(all_chats)}")
 
 def delete_active_chat_context_from_db(chat_key):
     conn = sqlite3.connect('users.db')
@@ -749,7 +790,7 @@ async def main():
     
     init_db()
     load_global_settings_from_db()
-    load_active_chats_from_db()
+    await load_active_chats_from_db()  # Await the loading
     allowed_ids = load_allowed_ids_from_db()
     print(f"allowed_ids: {allowed_ids}")
     await bot.set_my_commands(commands)
