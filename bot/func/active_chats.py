@@ -1,3 +1,5 @@
+import asyncio
+
 class ActiveChats:
     def __init__(self):
         self._active_chats = {}
@@ -57,5 +59,3 @@ class ActiveChats:
                     "temperature": default_temperature,
                     "selected_prompt_id": selected_prompt_id
                 }
-
-ACTIVE_CHATS = ActiveChats()
